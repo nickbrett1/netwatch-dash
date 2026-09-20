@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.nickbrett.netwatch.probe</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/nick/.local/bin/netwatch</string>
+		<string>probe</string>
+	</array>
+	<key>StartInterval</key>
+	<integer>300</integer>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/Users/nick/.local/state/netwatch/probe.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/nick/.local/state/netwatch/probe.log</string>
+</dict>
+</plist>

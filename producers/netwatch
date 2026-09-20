@@ -1,0 +1,269 @@
+#!/bin/bash
+# netwatch — detect LAN-path degradation (the "Mac wired into an Orbi
+# satellite with wireless backhaul" failure mode) cheaply and early.
+#
+# The probe measures gateway RTT, a wired peer's RTT, and interface RX over
+# the SAME window, then:
+#   * suppresses the alarm entirely when the link is busy (our own traffic ->
+#     the latency is our queueing, not a fault);
+#   * requires the RTT to stay high for RTT_WARN_CONSEC consecutive probes;
+#   * if the wired peer is slow too, blames the local segment/host; if the
+#     peer stays flat, blames the path at/above the router;
+#   * describes the link from its actual media (wired/wireless), no canned claim.
+#
+#   netwatch probe      cheap gateway-RTT + link check  (run every ~5 min)
+#   netwatch speed       full Ookla WAN throughput test  (run daily)
+#   netwatch report [n]  show last n runs (default 20)
+#   netwatch tail        live view
+#
+# Config: ~/.config/netwatch/config   (sourced bash; see keys below)
+# Log:    ~/.local/state/netwatch/events.jsonl
+
+set -uo pipefail
+
+CONFIG="${NETWATCH_CONFIG:-$HOME/.config/netwatch/config}"
+STATE="${NETWATCH_STATE:-$HOME/.local/state/netwatch}"
+LOG="$STATE/events.jsonl"
+ALERT_STATE="$STATE/.last_alert"
+mkdir -p "$STATE"
+
+# ---- defaults (override in config) --------------------------------------
+GATEWAY="auto"            # or an explicit IP; "auto" reads the default route
+RTT_WARN_MS=4.0           # avg gateway RTT above this = degraded path
+RTT_WARN_CONSEC=3         # ...for this many consecutive probes (persistence, not a blip)
+PING_COUNT=5              # pings per probe window
+NET_PEER="192.168.1.2"    # wired peer on the same switch; if it is slow too the
+                          # delay is local, not the router uplink. ""/none/off disables
+SAT_MBPS=100              # interface RX >= this (Mbps) => link busy => latency here is
+                          # our own queueing, so suppress the alarm
+SAT_LOAD=""               # optional: 1-min load avg >= this also counts as "busy" (off)
+DL_WARN_MBPS=250          # WAN download below this = alert
+UL_WARN_MBPS=250          # WAN upload below this = alert
+SPEEDTEST_BIN=""          # path to Ookla CLI; auto-detected if empty
+NTFY_TOPIC=""             # e.g. "nick-netwatch-9f3a" -> phone push via ntfy.sh
+ALERT_COOLDOWN=3600       # seconds between repeat alerts of the same kind
+NOTIFY_MACOS=true         # also show a desktop notification
+# -------------------------------------------------------------------------
+[ -f "$CONFIG" ] && . "$CONFIG"
+
+log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$STATE/netwatch.log"; }
+
+json_escape() { python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))'; }
+
+gw_ip() {
+  if [ "$GATEWAY" != "auto" ]; then echo "$GATEWAY"; return; fi
+  route -n get default 2>/dev/null | awk '/gateway/{print $2; exit}'
+}
+
+iface() { route -n get default 2>/dev/null | awk '/interface/{print $2; exit}'; }
+
+# --- alerting -------------------------------------------------------------
+# alert <kind> <title> <message>
+alert() {
+  local kind="$1" title="$2" msg="$3" now last
+  now=$(date +%s); last=0
+  [ -f "$ALERT_STATE" ] && last=$(awk -v k="$kind" '$1==k{print $2}' "$ALERT_STATE" 2>/dev/null)
+  last="${last:-0}"
+  if [ $((now - last)) -lt "$ALERT_COOLDOWN" ]; then
+    log "suppressed '$kind' alert (cooldown)"; return
+  fi
+  # replace/append this kind's timestamp
+  touch "$ALERT_STATE.tmp"
+  { grep -v "^$kind " "$ALERT_STATE" 2>/dev/null; echo "$kind $now"; } >"$ALERT_STATE.tmp" \
+    && mv "$ALERT_STATE.tmp" "$ALERT_STATE"
+
+  log "ALERT [$kind] $title — $msg"
+  if [ -n "$NTFY_TOPIC" ]; then
+    curl -s -m 10 -o /dev/null \
+      -H "Title: $title" -H "Tags: warning,network" -H "Priority: high" \
+      -d "$msg" "https://ntfy.sh/$NTFY_TOPIC" || log "ntfy send failed"
+  fi
+  if [ "$NOTIFY_MACOS" = true ]; then
+    osascript -e "display notification $(printf '%s' "$msg" | json_escape) with title $(printf '%s' "$title" | json_escape)" 2>/dev/null
+  fi
+}
+
+emit() { # emit <json-fragment>
+  printf '{"ts":"%s",%s}\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" >>"$LOG"
+}
+
+find_speedtest() {
+  [ -n "$SPEEDTEST_BIN" ] && [ -x "$SPEEDTEST_BIN" ] && { echo "$SPEEDTEST_BIN"; return; }
+  for c in "$HOME/.local/bin/speedtest" /private/tmp/ookla/speedtest /Volumes/home/speedtest/speedtest "$(command -v speedtest 2>/dev/null)"; do
+    [ -n "$c" ] && [ -x "$c" ] && { echo "$c"; return; }
+  done
+}
+
+# --- probe ----------------------------------------------------------------
+# bytes received on iface (monotonic counter, used for a throughput sample)
+iface_rx() {
+  netstat -ibn 2>/dev/null | awk -v d="$1" '$1==d && $3 ~ /^<Link/ {print $(NF-4); exit}'
+}
+
+cmd_probe() {
+  local gw dev avg loss media consec peer peer_avg peer_loss
+  local rx0 rx1 t0 t1 mbps saturated=false l1 link="wired"
+  gw=$(gw_ip); dev=$(iface)
+  if [ -z "$gw" ]; then log "probe: no default gateway"; return 0; fi
+
+  # Sample window: RX byte counter + wall clock. RTT and throughput are
+  # measured over the SAME window, so a busy link and a slow ping co-vary.
+  t0=$(python3 -c 'import time;print("%.3f"%time.time())')
+  rx0=$(iface_rx "$dev")
+
+  local out
+  out=$(ping -c "$PING_COUNT" -i 0.2 -W 2000 -t 5 "$gw" 2>/dev/null)
+  avg=$(printf '%s' "$out" | awk -F'/' '/round-trip|rtt/{print $5; exit}')
+  loss=$(printf '%s' "$out" | awk -F',' '/packet loss/{gsub(/[^0-9.]/,"",$3); print $3; exit}')
+  avg="${avg:-0}"; loss="${loss:-100}"
+
+  # Wired peer on the same switching fabric (default: the NAS). If it moves
+  # together with the gateway the delay is local, not the path above the router.
+  peer=""; peer_avg=""; peer_loss=""
+  case "$NET_PEER" in
+    ""|none|off|no) : ;;
+    *)
+      peer="$NET_PEER"
+      local pout
+      pout=$(ping -c "$PING_COUNT" -i 0.2 -W 2000 -t 5 "$peer" 2>/dev/null)
+      peer_avg=$(printf '%s' "$pout" | awk -F'/' '/round-trip|rtt/{print $5; exit}')
+      peer_loss=$(printf '%s' "$pout" | awk -F',' '/packet loss/{gsub(/[^0-9.]/,"",$3); print $3; exit}')
+      peer_avg="${peer_avg:-}"
+      ;;
+  esac
+
+  t1=$(python3 -c 'import time;print("%.3f"%time.time())')
+  rx1=$(iface_rx "$dev")
+
+  mbps=""
+  if [ -n "$rx0" ] && [ -n "$rx1" ]; then
+    mbps=$(awk -v a="$rx1" -v b="$rx0" -v s="$t0" -v e="$t1" \
+      'BEGIN{ if (e>s) printf "%.1f", (a-b)*8/1e6/(e-s) }')
+  fi
+
+  # Is the link busy (our own traffic)?  -> latency here is queueing, not a fault
+  if [ -n "$mbps" ] && awk -v m="$mbps" -v t="$SAT_MBPS" 'BEGIN{exit !(m>=t)}'; then
+    saturated=true
+  fi
+  if [ "$saturated" = false ] && [ -n "$SAT_LOAD" ]; then
+    l1=$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')
+    [ -n "$l1" ] && awk -v a="$l1" -v t="$SAT_LOAD" 'BEGIN{exit !(a>=t)}' && saturated=true
+  fi
+
+  media=""
+  [ -n "$dev" ] && media=$(ifconfig "$dev" 2>/dev/null \
+    | awk -F'media: ' '/media:/{print $2; exit}' \
+    | sed -E 's/.*\((.*)\).*/\1/; s/[<>]//g; s/,/ /g' | cut -c1-40)
+  printf '%s' "$media" | grep -qiE '802\.11|wi-?fi|wireless' && link="wireless"
+
+  # ---- emit + log -------------------------------------------------------
+  local frag="\"kind\":\"probe\",\"gw\":\"$gw\",\"iface\":\"$dev\",\"rtt_ms\":$avg,\"loss_pct\":${loss:-100},\"media\":\"${media}\",\"link\":\"${link}\""
+  [ -n "$mbps" ] && frag="$frag,\"rx_mbps\":$mbps,\"saturated\":$saturated"
+  if [ -n "$peer" ] && [ -n "$peer_avg" ]; then
+    frag="$frag,\"peer\":\"$peer\",\"peer_ms\":$peer_avg,\"peer_loss_pct\":${peer_loss:-100}"
+  fi
+  emit "$frag"
+  local satnote=""
+  [ "$saturated" = true ] && satnote=" SATURATED"
+  log "probe gw=$gw dev=$dev rtt=${avg}ms loss=${loss}% media=$media${peer:+ peer=${peer_avg}ms/${peer_loss}%}${mbps:+ rx=${mbps}Mbps}${satnote}"
+
+  # ---- alerting ---------------------------------------------------------
+
+  # 1) busy link: latency/loss is our own queueing -> never alert, reset streak.
+  if [ "$saturated" = true ]; then
+    echo 0 >"$STATE/.rtt_streak"
+    if awk -v a="$avg" -v t="$RTT_WARN_MS" 'BEGIN{exit !(a>t)}' \
+       || awk -v l="${loss:-100}" 'BEGIN{exit !(l>0)}'; then
+      log "probe: link saturated (${mbps}Mbps, rtt ${avg}ms, loss ${loss}%) — latency/loss alarm suppressed"
+    fi
+    return 0
+  fi
+
+  # 2) loss on a non-busy link is worth an immediate alert.
+  if awk -v l="${loss:-100}" 'BEGIN{exit !(l>0)}'; then
+    alert "loss" "Packet loss to gateway" \
+      "${loss}% loss to ${gw} on ${dev} [${media}]${peer:+; peer ${peer} ${peer_loss}%}"
+  fi
+
+  # 3) sustained high gateway RTT: require persistence, discriminate via peer.
+  if awk -v a="$avg" -v t="$RTT_WARN_MS" 'BEGIN{exit !(a>t)}'; then
+    consec=0
+    [ -f "$STATE/.rtt_streak" ] && consec=$(cat "$STATE/.rtt_streak")
+    consec=$((consec + 1)); echo "$consec" >"$STATE/.rtt_streak"
+    if [ "$consec" -ge "$RTT_WARN_CONSEC" ]; then
+      if [ -n "$peer_avg" ] && awk -v a="$peer_avg" -v t="$RTT_WARN_MS" 'BEGIN{exit !(a>t)}'; then
+        alert "rtt-local" "Local link path degraded" \
+          "Gateway ${gw} ${avg}ms and wired peer ${peer} ${peer_avg}ms both >${RTT_WARN_MS}ms (x${consec}) on ${dev} [${media}] — delay is local (segment/host), not the router uplink"
+      else
+        alert "rtt" "Network path degraded" \
+          "Gateway ${gw} RTT ${avg}ms (>${RTT_WARN_MS}ms x${consec}) on ${dev} [${media}${peer:+; wired peer ${peer} stayed ${peer_avg}ms}] — delay is at/above the router, link is ${link}"
+      fi
+    fi
+  else
+    echo 0 >"$STATE/.rtt_streak"
+  fi
+}
+
+# --- speedtest ------------------------------------------------------------
+cmd_speed() {
+  local st js dl ul ping srv
+  st=$(find_speedtest)
+  if [ -z "$st" ]; then log "speed: no Ookla CLI found"; echo "no Ookla CLI found" >&2; return 1; fi
+  js=$("$st" -f json 2>/dev/null) || { log "speed: speedtest failed"; return 1; }
+  read -r dl ul ping srv < <(printf '%s' "$js" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+print(round(d["download"]["bandwidth"]*8/1e6,1),
+      round(d["upload"]["bandwidth"]*8/1e6,1),
+      round(d["ping"]["latency"],1),
+      json.dumps(d["server"]["name"]+" "+d["server"]["location"]))')
+  emit "\"kind\":\"speed\",\"dl_mbps\":$dl,\"ul_mbps\":$ul,\"ping_ms\":$ping,\"server\":$srv"
+  log "speed dl=${dl}Mbps ul=${ul}Mbps ping=${ping}ms srv=$srv"
+
+  if awk -v d="$dl" -v t="$DL_WARN_MBPS" 'BEGIN{exit !(d<t)}'; then
+    alert "dl" "WAN downlink low" "Download ${dl} Mbps (<${DL_WARN_MBPS}) via $srv"
+  fi
+  if awk -v u="$ul" -v t="$UL_WARN_MBPS" 'BEGIN{exit !(u<t)}'; then
+    alert "ul" "WAN uplink low" "Upload ${ul} Mbps (<${UL_WARN_MBPS}) via $srv"
+  fi
+  echo "DL ${dl} Mbps  UL ${ul} Mbps  ping ${ping} ms  ($srv)"
+}
+
+# --- reporting ------------------------------------------------------------
+cmd_report() {
+  local n="${1:-20}"
+  [ -f "$LOG" ] || { echo "no events yet ($LOG)"; return; }
+  python3 - "$LOG" "$n" <<'EOF'
+import json,sys
+path,n=sys.argv[1],int(sys.argv[2])
+with open(path) as f:
+    rows=[json.loads(l) for l in f if l.strip()][-n:]
+for r in rows:
+    t=r["ts"][11:19]
+    if r["kind"]=="probe":
+        sat=r.get("saturated",False)
+        flag="  <-- DEGRADED" if (r.get("rtt_ms",0)>4 and not sat) else ""
+        extra=""
+        if r.get("peer_ms") is not None: extra+=f"  peer {r['peer_ms']}ms"
+        if r.get("rx_mbps") is not None: extra+=f"  rx {r['rx_mbps']}Mbps" + (" [SATURATED]" if sat else "")
+        print(f"{t}  probe   rtt {r.get('rtt_ms'):>6} ms  loss {r.get('loss_pct')}%  {r.get('iface')} {r.get('media','')}{extra}{flag}")
+    else:
+        print(f"{t}  speed   DL {r.get('dl_mbps'):>6}  UL {r.get('ul_mbps'):>6} Mbps  ping {r.get('ping_ms')} ms  {r.get('server')}")
+probes=[r for r in rows if r["kind"]=="probe"]
+speeds=[r for r in rows if r["kind"]=="speed"]
+if probes:
+    rs=[p["rtt_ms"] for p in probes]
+    print(f"\nprobe: {len(probes)} runs, rtt min/avg/max {min(rs):.2f}/{sum(rs)/len(rs):.2f}/{max(rs):.2f} ms")
+if speeds:
+    d=[s["dl_mbps"] for s in speeds]; u=[s["ul_mbps"] for s in speeds]
+    print(f"speed: {len(speeds)} runs, DL {min(d)}-{max(d)} Mbps, UL {min(u)}-{max(u)} Mbps")
+EOF
+}
+
+case "${1:-probe}" in
+  probe)  cmd_probe ;;
+  speed)  cmd_speed ;;
+  report) shift; cmd_report "$@" ;;
+  tail)   tail -f "$LOG" ;;
+  *) echo "usage: netwatch {probe|speed|report [n]|tail}" >&2; exit 2 ;;
+esac

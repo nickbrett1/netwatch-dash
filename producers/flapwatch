@@ -1,0 +1,153 @@
+#!/bin/bash
+# flapwatch — high-frequency gateway/link blip capture
+# Per-second probes + route/ARP/media diffs, so a transient blackhole
+# (like the 5/5-drop @ 15:00:48) is caught in the act, not inferred.
+#
+# Usage: flapwatch [seconds] [interval]
+#   flapwatch            # 3600s @ 1s
+#   flapwatch 300 0.5    # 5 min @ 0.5s
+
+set -u
+CFG="$HOME/.config/netwatch/config"
+[ -f "$CFG" ] && . "$CFG"
+STATE="${NETWATCH_STATE:-$HOME/.local/state/netwatch}"
+DURATION="${1:-3600}"
+INTERVAL="${2:-1}"
+HB_EVERY="${HB_EVERY:-300}"   # emit a heartbeat every N ticks (0=off)
+GW="${GATEWAY:-192.168.1.1}"
+STAMP=$(date '+%Y%m%d-%H%M%S')
+LOG="$STATE/flapwatch-$STAMP.jsonl"
+SUM="$STATE/flapwatch-$STAMP.summary.txt"
+mkdir -p "$STATE"
+
+json_escape() { python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))'; }
+
+# detect gateway device
+det_gw_dev() {
+  local g="${1:-$GW}"
+  route -n get "$g" 2>/dev/null | awk '/interface:/{print $2; exit}'
+}
+DEV=$(det_gw_dev "$GW"); DEV="${DEV:-en0}"
+
+emit() { printf '{"ts":"%s","t":%d,%s}\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$(date +%s)" "$1" >>"$LOG"; }
+
+# net fingerprint: routes + gw ARP + media/status + primary iface
+fingerprint() {
+  {
+    netstat -rn -f inet 2>/dev/null | awk '$1=="default"{print $1,$2,$3,$4}'
+    arp -an 2>/dev/null | awk -v g="($GW)" 'index($0,g){print}'
+    ifconfig "$DEV" 2>/dev/null | awk -F'media: ' '/media:|status:/{print}'
+    scutil <<< "show State:/Network/Global/IPv4" 2>/dev/null | awk '/PrimaryInterface|Router/{print}'
+  } | sort
+}
+
+alert_ntfy() { # alert <title> <msg>
+  local title="$1" msg="$2"
+  if [ -n "${NTFY_TOPIC:-}" ]; then
+    curl -s -m 10 -o /dev/null \
+      -H "Title: $title" -H "Tags: warning,network" -H "Priority: high" \
+      -d "$msg" "https://ntfy.sh/$NTFY_TOPIC" || true
+  fi
+  if [ "${NOTIFY_MACOS:-false}" = true ]; then
+    osascript -e "display notification $(printf '%s' "$msg" | json_escape) with title $(printf '%s' "$title" | json_escape)" 2>/dev/null
+  fi
+}
+
+prev_fp=$(fingerprint)
+prev_fp_hash=$(printf '%s' "$prev_fp" | md5)
+consec_loss=0
+max_consec=0
+total_loss=0
+total_ticks=0
+loss_events=0
+netchanges=0
+max_rtt=0
+last_rtt=0
+alerted=0
+end=$(( $(date +%s) + DURATION ))
+
+echo "flapwatch: gw=$GW dev=$DEV duration=${DURATION}s interval=${INTERVAL}s"
+echo "log:     $LOG"
+emit "\"kind\":\"start\",\"gw\":\"$GW\",\"dev\":\"$DEV\",\"duration\":$DURATION,\"interval\":$INTERVAL"
+
+while [ "$(date +%s)" -lt "$end" ]; do
+  t0=$(python3 -c 'import time;print(time.time())' 2>/dev/null || date +%s)
+  out=$(ping -c 1 -W 1000 -t 1 "$GW" 2>/dev/null)
+  total_ticks=$((total_ticks+1))
+
+  if printf '%s' "$out" | grep -q 'time='; then
+    rtt=$(printf '%s' "$out" | awk -F'time=' '{print $2}' | awk '{print $1}')
+    rtt_int=${rtt%%.*}
+    last_rtt=${rtt:-0}
+    [ -n "$rtt_int" ] && [ "$rtt_int" -gt "${max_rtt:-0}" ] && max_rtt=$rtt_int
+    if [ "$consec_loss" -gt 0 ]; then
+      emit "\"kind\":\"recover\",\"after_consec_loss\":$consec_loss,\"rtt_ms\":${rtt:-0}"
+    fi
+    consec_loss=0
+  else
+    total_loss=$((total_loss+1))
+    consec_loss=$((consec_loss+1))
+    [ "$consec_loss" -gt "$max_consec" ] && max_consec=$consec_loss
+    if [ "$consec_loss" -eq 1 ]; then
+      loss_events=$((loss_events+1))
+      fp=$(fingerprint)
+      fph=$(printf '%s' "$fp" | md5)
+      media=$(ifconfig "$DEV" 2>/dev/null | awk -F'media: ' '/media:/{print $2; exit}')
+      status=$(ifconfig "$DEV" 2>/dev/null | awk '/status:/{print $2; exit}')
+      emit "\"kind\":\"loss\",\"gw\":\"$GW\",\"dev\":\"$DEV\",\"media\":\"$media\",\"status\":\"$status\",\"net_changed\":$([ "$fph" != "$prev_fp_hash" ] && echo true || echo false)"
+      if [ "$alerted" -eq 0 ]; then
+        alerted=1
+        alert_ntfy "flapwatch: gateway loss" "Packet loss to $GW on $DEV detected (status=$status media=$media)"
+      fi
+    fi
+  fi
+
+  # net fingerprint diff (independent of ping result)
+  cur_fp=$(fingerprint)
+  cur_fp_hash=$(printf '%s' "$cur_fp" | md5)
+  if [ "$cur_fp_hash" != "$prev_fp_hash" ]; then
+    netchanges=$((netchanges+1))
+    diff_txt=$(diff <(printf '%s\n' "$prev_fp") <(printf '%s\n' "$cur_fp") | head -20)
+    emit "\"kind\":\"netchange\",\"n\":$netchanges,\"diff\":$(printf '%s' "$diff_txt" | json_escape)"
+    prev_fp="$cur_fp"; prev_fp_hash="$cur_fp_hash"
+  fi
+
+  # heartbeat so a live run is distinguishable from a hung one
+  if [ "$HB_EVERY" -gt 0 ] && [ $((total_ticks % HB_EVERY)) -eq 0 ]; then
+    emit "\"kind\":\"hb\",\"tick\":$total_ticks,\"loss\":$total_loss,\"loss_events\":$loss_events,\"netchanges\":$netchanges,\"max_consec\":$max_consec,\"last_rtt_ms\":$last_rtt,\"max_rtt_ms\":$max_rtt"
+  fi
+
+  # pace to interval
+  t1=$(python3 -c 'import time;print(time.time())' 2>/dev/null || date +%s)
+  sleep_for=$(python3 -c "print(max(0, $INTERVAL - ($t1 - $t0)))" 2>/dev/null || echo 0)
+  [ "$sleep_for" = "0" ] || sleep "$sleep_for"
+done
+
+pct=$(python3 -c "print(round(100*$total_loss/max(1,$total_ticks),2))")
+emit "\"kind\":\"stop\",\"ticks\":$total_ticks,\"loss\":$total_loss,\"loss_pct\":$pct,\"loss_events\":$loss_events,\"max_consec_loss\":$max_consec,\"netchanges\":$netchanges,\"max_rtt_ms\":$max_rtt"
+
+{
+  echo "flapwatch summary  $STAMP"
+  echo "gateway          $GW on $DEV"
+  echo "duration         ${DURATION}s @ ${INTERVAL}s"
+  echo "ticks            $total_ticks"
+  echo "packets lost     $total_loss  (${pct}%)"
+  echo "loss events      $loss_events"
+  echo "longest outage   ${max_consec}s"
+  echo "route/arp/media  ${netchanges} change(s)"
+  echo "max rtt observed ${max_rtt} ms"
+  echo "log              $LOG"
+} | tee "$SUM"
+
+echo
+if [ "$loss_events" -gt 0 ] || [ "$netchanges" -gt 0 ]; then
+  echo "--- notable events ---"
+  python3 - "$LOG" <<'EOF'
+import json,sys
+for l in open(sys.argv[1]):
+    try: e=json.loads(l)
+    except: continue
+    if e.get("kind") in ("loss","recover","netchange","stop"):
+        print(" ", l.rstrip())
+EOF
+fi

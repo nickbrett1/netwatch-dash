@@ -1,0 +1,4 @@
+{"ts":"2026-09-13T19:54:17Z","kind":"probe","gw":"192.168.1.1","iface":"en0","rtt_ms":2.409,"loss_pct":0.0,"media":"1000baseT full-duplex flow-control energ"}
+{"ts":"2026-09-20T12:44:10Z","kind":"probe","gw":"192.168.1.1","iface":"en0","rtt_ms":4.850,"loss_pct":0.0,"media":"1000baseT full-duplex flow-control energ","link":"wired","rx_mbps":0.0,"saturated":false,"peer":"192.168.1.2","peer_ms":0.929,"peer_loss_pct":0.0}
+{"ts":"2026-09-20T12:49:13Z","kind":"probe","gw":"192.168.1.1","iface":"en0","rtt_ms":8.090,"loss_pct":0.0,"media":"1000baseT full-duplex flow-control energ","link":"wired","rx_mbps":0.0,"saturated":false,"peer":"192.168.1.2","peer_ms":0.826,"peer_loss_pct":0.0}
+{"ts":"2026-09-13T18:20:14Z","kind":"probe","gw":"192.168.1.1","iface":"en0","rtt_ms":2.932,"loss_pct":0.0,"media":"autoselect"}

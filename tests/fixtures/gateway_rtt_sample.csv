@@ -1,0 +1,11 @@
+ts_iso,unixtime,target,rtt_ms
+# start pid=8028 gw=192.168.1.1 net=1.1.1.1
+# loss 2026-09-17T13:09:07 gw
+# burst_start 2026-09-17T13:08:38 163.9ms
+# burst_end 2026-09-17T13:08:39 peak=163.9ms
+# link_change 2026-09-17T13:09:07 autoselect (1000baseT <full-duplex,flow-control,energy-efficient-ethernet>) -> ?
+# orbi 2026-09-17T13:08:18 {"internet": 0, "internet_head": "STATUS", "internet_text": "GOOD", "satellites_num": 3, "devices_num": 28}
+2026-09-17T12:59:46.174,1789664386.175,gw,2.084
+2026-09-17T13:08:18.024,1789664898.025,wire,0.765
+2026-09-17T13:08:18.024,1789664898.025,wl,3.314
+2026-09-17T12:59:46.174,1789664386.175,net,6.593
