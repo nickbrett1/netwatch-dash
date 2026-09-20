@@ -53,6 +53,21 @@ def _float_env(env: Mapping[str, str], key: str, default: float) -> float:
         return default
 
 
+def _int_env(env: Mapping[str, str], key: str, default: int) -> int:
+    """An integer setting, with an unparseable value falling back to the default.
+
+    Same reasoning as `_float_env`: a window is not a credential, and a typo must
+    not become 0 — a zero-byte tail would report an empty file rather than fail.
+    """
+    value = env.get(key)
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
 @dataclass(frozen=True)
 class Settings:
     """The dashboard's environment, resolved once at start-up."""
@@ -69,7 +84,11 @@ class Settings:
     # are multiples of the producers' own cadences: a probe runs every 300 s, so
     # one missed run is jitter and three is 15 minutes of nothing.
     probe_stale_s: float = 900.0
-    speed_stale_s: float = 172800.0  # two missed daily runs
+    speed_stale_s: float = 172800.0
+    csv_tail_bytes: int = 4 << 20
+    csv_retention_s: float = 86400.0
+    csv_refresh_s: float = 5.0
+    csv_stale_s: float = 900.0  # two missed daily runs
 
     @property
     def events_path(self) -> Path:
@@ -122,4 +141,14 @@ class Settings:
             build_info_path=Path(build_info).expanduser() if build_info else None,
             probe_stale_s=_float_env(env, "NETWATCH_DASH_PROBE_STALE_S", 900.0),
             speed_stale_s=_float_env(env, "NETWATCH_DASH_SPEED_STALE_S", 172800.0),
+            # The CSV seed window. Bounded so that a year of growth does not
+            # become a year of start-up: the tailer reads forward from here.
+            csv_tail_bytes=_int_env(env, "NETWATCH_DASH_CSV_TAIL_BYTES", 4 << 20),
+            csv_retention_s=_float_env(env, "NETWATCH_DASH_CSV_RETENTION_S", 86400.0),
+            csv_refresh_s=_float_env(env, "NETWATCH_DASH_CSV_REFRESH_S", 5.0),
+            # How old the newest CSV sample may be before the forwarded-path
+            # reading stops speaking for the link. The producer writes every 1-5 s,
+            # so 15 minutes of silence is not "a quiet path", it is a reader that
+            # is no longer seeing the writer.
+            csv_stale_s=_float_env(env, "NETWATCH_DASH_CSV_STALE_S", 900.0),
         )

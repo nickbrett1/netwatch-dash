@@ -246,9 +246,10 @@ def derive_status(
     loss_pct: float | None,
     link_ok: bool | None,
     forwarded_rtt_ms: float | None,
-    forwarded_warn_ms: float,
+    forwarded_warn_ms: float | None,
     probe_age_s: float | None,
     probe_stale_s: float,
+    csv_loss_pct: float | None = None,
     en0_errors: int | None = None,
     rtt_streak: int | None = None,
     gw_rtt_ms: float | None = None,
@@ -271,11 +272,23 @@ def derive_status(
         return "crit"
     if loss_pct is not None and loss_pct > 0:
         return "crit"
+    # The csv is the other loss source (§7: "empty `rtt_ms` in the CSV"). Passed
+    # separately from the probe's so a red tile can name which side saw it.
+    if csv_loss_pct is not None and csv_loss_pct > 0:
+        return "crit"
     if link_ok is False:
         return "crit"
     if en0_errors:
         return "crit"
-    if forwarded_rtt_ms is not None and forwarded_rtt_ms > forwarded_warn_ms:
+    # §7: the forwarded path replaces the gateway as the latency canary. Both
+    # sides optional, and a missing threshold means no comparison is possible —
+    # which must not become a comparison against zero, or every reading over 0 ms
+    # would be a warning.
+    if (
+        forwarded_rtt_ms is not None
+        and forwarded_warn_ms is not None
+        and forwarded_rtt_ms > forwarded_warn_ms
+    ):
         return "warn"
     if rtt_streak:
         return "warn"

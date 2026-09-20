@@ -111,8 +111,10 @@ def test_ok_is_still_qualified_by_what_is_not_read(tmp_path):
     settings = make_settings(tmp_path, events_text=fixture_events())
     reasons = snapshot.build(settings, now=at(AFTER_NEWEST)).status_reason()
 
-    assert any("forwarded-path RTT" in r for r in reasons)
-    assert any("en0 error counters" in r for r in reasons)
+    # The csv is not read here, so the status says so rather than implying it was.
+    assert any("gateway_rtt.csv" in r for r in reasons)
+    # And the signals §7 lists but the derivation leaves out are named.
+    assert any("peer RTT" in r for r in reasons)
 
 
 def test_a_stale_probe_is_crit(tmp_path):
@@ -350,9 +352,10 @@ def test_summary_carries_its_own_evidence(tmp_path):
     assert body["tz"] == "America/New_York"
     assert body["sources"]["events"]["lines"] == 4
     assert body["sources"]["events"]["truncated"] is False
-    # The CSV is named and explicitly not read, rather than absent from the answer.
+    # The CSV is named and explicitly not read, rather than absent from the
+    # answer: a snapshot built without a rollup never touches the file (schema §3).
     assert body["sources"]["csv"]["read"] is False
-    assert "schema §3" in body["sources"]["csv"]["reason"]
+    assert body["csv"]["reading"] is False  # not yet seeded, and it says so
 
 
 def test_every_endpoint_answers_200(tmp_path):
@@ -382,5 +385,6 @@ def test_healthz_reports_the_drift_count_and_the_status(tmp_path):
 
     assert body["status"] == "ok"
     assert body["data"]["drift_count"] == 1
-    assert body["data"]["drift"]["unknown_fields"] == ["brand_new"]
+    assert body["data"]["drift"]["events.jsonl"]["unknown_fields"] == ["brand_new"]
+    assert body["data"]["drift"]["gateway_rtt.csv"]["count"] == 0
     assert body["sources"]["events"]["lines"] == 1

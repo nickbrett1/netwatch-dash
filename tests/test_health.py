@@ -162,15 +162,11 @@ def test_absent_config_is_reported_not_assumed(tmp_path):
     assert body["config_error"] == "not present"
 
 
-def test_not_implemented_endpoints_are_named_with_a_reason(tmp_path):
-    """A missing endpoint should be a documented absence, not a 404 to interpret."""
+def test_no_endpoint_is_named_as_missing_any_more(tmp_path):
+    """Every endpoint the contract named now exists; the list is empty, not gone."""
     write_build_info(tmp_path)
     body = healthz_body(make_settings(tmp_path))
-    assert "/api/localise" in body["not_implemented"]
-    assert "Phase 3" in body["not_implemented"]["/api/localise"]
-    # and the ones that exist are not listed as missing
-    assert "/api/summary" not in body["not_implemented"]
-    assert "/api/probe" not in body["not_implemented"]
+    assert body["not_implemented"] == {}
 
 
 def test_version_flag_answers_without_the_asgi_stack(tmp_path, monkeypatch, capsys):
