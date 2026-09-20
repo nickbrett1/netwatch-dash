@@ -474,11 +474,28 @@ class Snapshot:
                 "speak for the link now"
             )
             return
-        for key, name in (("DL_WARN_MBPS", "download"), ("UL_WARN_MBPS", "upload")):
-            if self.config.get(key) is not None and _config_number(
-                self.config, key
-            ) is None:
-                reasons.append(f"{key} is not a number, so {name} has no threshold")
+        for key, name, field in (
+            ("DL_WARN_MBPS", "download", "dl_mbps"),
+            ("UL_WARN_MBPS", "upload", "ul_mbps"),
+        ):
+            threshold = _config_number(self.config, key)
+            if threshold is None:
+                if self.config.get(key) is not None:
+                    reasons.append(f"{key} is not a number, so {name} has no threshold")
+                continue
+            value = _number(speed.get(field))
+            if value is None:
+                reasons.append(
+                    f"no {name} figure in the newest speed measurement, so "
+                    f"{key}={threshold:g} has nothing to compare"
+                )
+            elif value < threshold:
+                # Without this the tile can be amber for a reason the list never
+                # states — which is the same defect as a verdict that never
+                # changes, one level down.
+                reasons.append(
+                    f"{name} is {value:.0f} Mbps, below the host's {key}={threshold:g}"
+                )
 
     # --- the evidence -------------------------------------------------------
 

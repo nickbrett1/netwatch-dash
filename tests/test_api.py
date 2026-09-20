@@ -212,6 +212,13 @@ def test_throughput_below_threshold_is_warn_when_the_measurement_is_current(tmp_
     snap = snapshot.build(settings, now=at(AFTER_NEWEST))
 
     assert snap.status == "warn"
+    # The light being amber for a reason the list never states is the same defect
+    # as a verdict that never changes, one level down: the reason list is how a
+    # reader interrogates the status, and `warn` with no matching line is a dead
+    # end. Both figures are named, and the one that is fine stays unmentioned.
+    reasons = snap.status_reason()
+    assert any("download is 10 Mbps, below the host's DL_WARN_MBPS=100" in r for r in reasons), reasons
+    assert not any("upload is" in r for r in reasons), reasons
 
 
 def test_a_stale_speed_measurement_does_not_move_the_status(tmp_path):
