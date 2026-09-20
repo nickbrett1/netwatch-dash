@@ -140,6 +140,12 @@ new fact, not a reinterpretation of an old one.
 
 ## 4. Working around it today (netwatch-dash)
 
+> **Superseded** by §7, and by the §5 item below landing. The filename trick is
+> recorded because it is what the first real payload would have shipped; nothing
+> relies on it now — `scripts/release-artifacts.sh` writes the manifest key from a
+> declared constant and *asserts* the asset name against it, and
+> `docs/release-payload.md` has the current shape.
+
 We do **not** need to wait for the genproj change. `scripts/` is **app-owned**
 (it is seeded once and never overwritten on regeneration), and the seeded
 `release-artifacts.sh` derives the manifest key **from the asset filename**:
@@ -169,7 +175,12 @@ cannot exec.
 1. **Now (netwatch-dash):** declare `github-release.target` = `aarch64-apple-darwin`
    and pack `dist/` as `…-aarch64-apple-darwin.tar.gz`; publish no `any` asset.
    (The label itself is only *honest* once the payload bundles the interpreter —
-   see §7.)
+   see §7.) → **Done**, landed with the bundled interpreter rather than ahead of
+   it (`scripts/release-artifacts.sh`, `docs/release-payload.md`). Verified both
+   ways against the real launcher: a `Darwin`/`arm64` host resolves the payload
+   and installs it; a `Linux`/`aarch64` host resolves **nothing** and starts what
+   it has. And done **without regenerating** — see trap 1 for why a regen would
+   not have been the thing that did it.
 2. **Upstream (genproj):** add the singular declared target so the missing third
    shape has a name, and reword the two guards. → **Done 2026-09-20; see §7.**
 
@@ -211,7 +222,7 @@ resolves that triple first (`Darwin`/`arm64` -> `["aarch64-apple-darwin",
 "any"]`), and the singular target deliberately does **not** create a build
 matrix - the pipeline still runs one build step uploading `dist/**`.
 
-### Three traps to know before regenerating
+### Five traps to know before regenerating
 
 1. **A regen does not refresh `scripts/release-artifacts.sh`.** Under
    `src/generator/genproj-overwrite.js`, `scripts/` is app-owned and a diverged
@@ -229,3 +240,17 @@ matrix - the pipeline still runs one build step uploading `dist/**`.
    the mirror-image lie. The triple is honest only once `dist/` bundles the
    arm64 CPython (the launcher-shaped tree in the §10.2 rewrite). Land the
    declaration and the bundled payload together, never the label alone.
+   — Done: the declaration and the bundled interpreter landed in one commit.
+4. **A regen reverts `.buildkite/pipeline.yml`, which is where the release step's
+   *provisioning* lives.** The payload is assembled in the fleet's Linux/arm64
+   container, so the macOS bundle is built by cross-install and the architecture
+   assertions in `scripts/release-artifacts.sh` are what make that safe. Running
+   the payload natively - and running it *at all* before publishing - needs the
+   release step (or a new step) re-provisioned without the docker plugin. Note
+   that `buildkite-agent pipeline upload` can only **add** a step, never
+   re-provision an existing one, so this cannot be pushed entirely into an
+   app-owned file: if a regen reverts the pipeline, re-check this first.
+5. **A regen reverts `.gitignore`**, and genproj's copy does not ignore `dist/`
+   or `release/`. `release/` holds a ~20 MB tarball with a CPython inside it, so
+   an un-ignored `release/` is one `git add -A` away from committing a binary to
+   history. Re-add both entries after a regen (this one is worth upstreaming).

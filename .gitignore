@@ -33,5 +33,12 @@ venv/
 *.manifest
 *.egg-info/
 
+# Build output and the packaged release payloads. `dist/` is what the build step
+# uploads; `release/` is what scripts/release-artifacts.sh writes (a ~20 MB
+# tarball that embeds a CPython). Neither is source, and an un-ignored `release/`
+# is one `git add -A` away from committing a 20 MB binary to history.
+dist/
+release/
+
 
 

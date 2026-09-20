@@ -99,17 +99,23 @@ Per `src/generator/genproj-overwrite.js`:
 Two consequences for **this** repo:
 
 1. **`scripts/release-artifacts.sh` is app-owned → a regen will NOT refresh it.**
-   It currently packs the payload under `any` (the old placeholder). Declaring
-   `github-release.target` changes what a *new* project is *seeded* with — not a
-   file already on disk. To take the generator's wording, either delete the file
-   before regenerating (so it re-seeds) or pass
-   `resolutions: { "scripts/release-artifacts.sh": "overwrite" }`. Note the file
-   is going to be rewritten by hand anyway for the launcher-shaped payload
-   (§10.2), so this is moot in practice.
+   Declaring `github-release.target` changes what a *new* project is *seeded*
+   with — not a file already on disk. This is not hypothetical: it is why the
+   declared triple was landed by rewriting the script by hand rather than by
+   regenerating (`docs/release-payload.md`). To take the generator's wording,
+   delete the file before regenerating (so it re-seeds) or pass
+   `resolutions: { "scripts/release-artifacts.sh": "overwrite" }` — but note the
+   seeded script packs a plain `dist/` tarball, so taking it means giving up the
+   launcher-shaped payload again.
 2. **`pyproject.toml` is infra → a regen overwrites it.** This loses
    `[tool.ruff] extend-exclude = ["producers"]` (added so the verbatim host
    producer copies are never reformatted). Re-apply it after any regeneration, or
    upstream the exclusion.
+
+The full list of things a regen would silently undo — five of them, including
+`.buildkite/pipeline.yml` (where the release step's provisioning lives) and
+`.gitignore` (which does not ignore `dist/` or `release/`) — is in
+`docs/genproj-target-gap.md` §7.
 
 Also note: declaring `target` (singular) does **not** change
 `.buildkite/pipeline.yml`. Only the plural `targets` creates a build matrix;
