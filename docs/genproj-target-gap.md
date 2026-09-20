@@ -1,8 +1,10 @@
 # genproj gap: a single artifact that *is* platform-specific has no target label
 
-**Status:** open upstream gap · **Found:** 2026-09-20 · **Affects:** any non-rust
-genproj project that bundles a platform-specific interpreter (a
-python-build-standalone CPython, a vendored Node, a JRE)
+**Status:** ✅ **fixed upstream 2026-09-20** — a singular `github-release.target`
+was added (see §7). The gap below is kept as the record of what it looked like.
+**Found:** 2026-09-20 · **Affects:** any non-rust genproj project that bundles a
+platform-specific interpreter (a python-build-standalone CPython, a vendored
+Node, a JRE)
 **Repos:** `nickbrett1/genproj` (generator) · `nickbrett1/netwatch-dash` (first
 project to hit it)
 
@@ -164,11 +166,12 @@ cannot exec.
 
 ## 5. Recommendation
 
-1. **Now (netwatch-dash):** pack as `…-aarch64-apple-darwin.tar.gz`; publish no
-   `any` asset. Costs nothing, needs no upstream change.
+1. **Now (netwatch-dash):** declare `github-release.target` = `aarch64-apple-darwin`
+   and pack `dist/` as `…-aarch64-apple-darwin.tar.gz`; publish no `any` asset.
+   (The label itself is only *honest* once the payload bundles the interpreter —
+   see §7.)
 2. **Upstream (genproj):** add the singular declared target so the missing third
-   shape has a name, and reword the two guards. File as an issue on
-   `nickbrett1/genproj` with this memo as the body.
+   shape has a name, and reword the two guards. → **Done 2026-09-20; see §7.**
 
 ## 6. References
 
@@ -182,3 +185,47 @@ cannot exec.
 | `dist/` packed as `<project>-any.tar.gz` | `src/generator/templates/github-release-artifacts.template` |
 | Manifest key derived **from the filename** | same template (manifest block) |
 | Launcher intersects manifest keys, never builds a label | `src/generator/templates/scripts-fetch-launch.sh.template` → `candidates()` |
+
+## 7. Resolution (upstream, 2026-09-20)
+
+genproj named the missing third shape. The vocabulary gained a **singular**
+declared label, distinct from the plural build matrix:
+
+| Knob | Meaning | Emits |
+| --- | --- | --- |
+| `github-release.targets` (plural) | native build **matrix**: one build step per triple (rust only) | N steps, `build/<target>/` each |
+| `github-release.target` (singular) | **one** artifact, genuinely platform-specific | the single `dist/` payload, keyed by the triple |
+
+`validateReleaseTargets` now enforces all four cases: both set -> refused
+(ambiguous); a `target` not in `TARGET_LABELS` -> refused; `targets` on a
+non-rust language -> refused and *points at `target`*; `target` on rust ->
+refused and *points at `targets`* (a one-entry matrix). The template packs
+`dist/` under `githubReleaseDistTarget = singleTarget || UNIVERSAL_TARGET`, and
+`validateFetchLaunch` was reworded to say node/python is **permitted** to be
+architecture-independent, not **guaranteed** to be.
+
+**Consequence for us:** declaring `github-release.target` =
+`aarch64-apple-darwin` is now the supported way to publish our payload, so the
+filename-derived workaround in §4 is no longer needed. Our launcher already
+resolves that triple first (`Darwin`/`arm64` -> `["aarch64-apple-darwin",
+"any"]`), and the singular target deliberately does **not** create a build
+matrix - the pipeline still runs one build step uploading `dist/**`.
+
+### Three traps to know before regenerating
+
+1. **A regen does not refresh `scripts/release-artifacts.sh`.** Under
+   `src/generator/genproj-overwrite.js`, `scripts/` is app-owned and a diverged
+   app file is *never* replaced - only `cloud_login.sh` and the
+   wrangler/doppler helpers are genproj-owned scripts. Our copy (still the old
+   placeholder) will therefore keep packing `...-any.tar.gz` after a regen. To
+   take the generator's new wording, delete the file first so it re-seeds, or
+   resolve that one path to `overwrite` in the regen call.
+2. **A regen *does* overwrite `pyproject.toml`** (infra). Our
+   `[tool.ruff] extend-exclude = ["producers"]` is not generator-owned and would
+   be lost - re-apply it after the regen, or upstream the exclusion.
+3. **Do not put the triple on the *current* payload.** `dist/` today is the
+   wheel + sdist from `python -m build` - pure-python, i.e. genuinely
+   architecture-*independent*. Labelling that `aarch64-apple-darwin` would be
+   the mirror-image lie. The triple is honest only once `dist/` bundles the
+   arm64 CPython (the launcher-shaped tree in the §10.2 rewrite). Land the
+   declaration and the bundled payload together, never the label alone.
