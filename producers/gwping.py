@@ -19,7 +19,8 @@ A '# orbi ...' line is appended every 60s with the router's own view
 (internet status, satellite count, device count).
 
 CSV columns: ts_iso,unixtime,target,rtt_ms   (rtt_ms empty = timeout/loss)
-Marker lines start with '#': burst_start/burst_end, loss, link_change, orbi.
+Marker lines start with '#': burst_start/burst_end, loss, link_change, orbi,
+iferrs (cumulative en0 Ierrs/Oerrs/Coll + rx/tx bytes, raw not delta).
 
 Usage:
   python3 gwping.py                  # run forever
@@ -85,6 +86,43 @@ def media_of(iface="en0"):
     except (subprocess.TimeoutExpired, OSError):
         pass
     return "?"
+
+
+def iface_counters(iface="en0"):
+    """Cumulative en0 counters from `netstat -ib`, or None.
+
+    Values are raw since-boot totals, deliberately NOT deltas: the dashboard
+    owns delta derivation and reset handling (schema §8). Failing to read them
+    is normal (missing interface, sandboxed runner) and must never raise.
+    """
+    try:
+        out = subprocess.run(["netstat", "-ib"], capture_output=True, text=True, timeout=3)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    best = None
+    for line in out.stdout.splitlines()[1:]:
+        p = line.split()
+        # Name Mtu Network Address Ipkts Ierrs Ibytes Opkts Oerrs Obytes Coll
+        if len(p) < 11 or p[0] != iface:
+            continue
+        try:
+            vals = [int(x) for x in (p[4], p[5], p[6], p[7], p[8], p[9], p[10])]
+        except ValueError:
+            continue
+        row = dict(zip(("ipkts", "ierrs", "ibytes", "opkts", "oerrs", "obytes", "coll"), vals))
+        # Prefer the cumulative link row (largest packet count).
+        if best is None or row["ipkts"] > best["ipkts"]:
+            best = row
+    if best is None:
+        return None
+    return {
+        "iface": iface,
+        "ierrs": best["ierrs"],
+        "oerrs": best["oerrs"],
+        "coll": best["coll"],
+        "rx_bytes": best["ibytes"],
+        "tx_bytes": best["obytes"],
+    }
 
 
 def read_creds():
@@ -171,6 +209,9 @@ def run(duration=None):
             st = orbi_status()
             log.write(f"# orbi {now.isoformat(timespec='seconds')} "
                       f"{json.dumps(st) if st else 'unavailable'}\n")
+            ctr = iface_counters()
+            if ctr is not None:
+                log.write(f"# iferrs {now.isoformat(timespec='seconds')} {json.dumps(ctr)}\n")
 
         m = media_of()
         if m != last_media:

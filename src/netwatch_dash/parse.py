@@ -13,20 +13,47 @@ from dataclasses import dataclass, field
 
 PROBE_FIELDS = frozenset(
     {
-        "ts", "kind", "gw", "iface", "rtt_ms", "loss_pct", "media",
+        "ts",
+        "kind",
+        "gw",
+        "iface",
+        "rtt_ms",
+        "loss_pct",
+        "media",
         # added by the producer 2026-09-20
-        "link", "rx_mbps", "saturated", "peer", "peer_ms", "peer_loss_pct",
+        "link",
+        "rx_mbps",
+        "saturated",
+        "peer",
+        "peer_ms",
+        "peer_loss_pct",
     }
 )
 SPEED_FIELDS = frozenset({"ts", "kind", "dl_mbps", "ul_mbps", "ping_ms", "server"})
 CSV_TARGETS = frozenset({"gw", "wire", "wl", "net"})
 CSV_MARKERS = frozenset(
-    {"start", "loss", "burst_start", "burst_end", "link_change", "orbi", "iferrs"}
+    {
+        "start",
+        "stop",
+        "loss",
+        "burst_start",
+        "burst_end",
+        "link_change",
+        "orbi",
+        "iferrs",
+    }
 )
 # The dashboard reads only these keys from ~/.config/netwatch/config.
 # NTFY_TOPIC is deliberately absent and must never be read or emitted.
 CONFIG_WHITELIST = frozenset(
-    {"RTT_WARN_MS", "RTT_WARN_CONSEC", "DL_WARN_MBPS", "UL_WARN_MBPS", "ALERT_COOLDOWN", "NET_PEER"}
+    {
+        "RTT_WARN_MS",
+        "RTT_WARN_CONSEC",
+        "DL_WARN_MBPS",
+        "UL_WARN_MBPS",
+        "ALERT_COOLDOWN",
+        "NET_PEER",
+    }
 )
 
 
@@ -110,6 +137,49 @@ def parse_csv_line(line: str, drift: Drift | None = None) -> tuple[str, dict] | 
             "loss": not rtt,
         },
     )
+
+
+IFERR_FIELDS = frozenset({"iface", "ierrs", "oerrs", "coll", "rx_bytes", "tx_bytes"})
+
+
+def parse_iferrs(marker: dict, drift: Drift | None = None) -> dict | None:
+    """Payload of an `# iferrs <ts> {json}` marker, or None.
+
+    Raw counters are returned untouched (the schema says the *dashboard* owns
+    deltas); unrecognised keys are counted as drift, never dropped.
+    """
+    parts = marker.get("raw", "").split(maxsplit=3)
+    if len(parts) < 4:
+        if drift:
+            drift.bad_lines += 1
+        return None
+    try:
+        payload = json.loads(parts[3])
+    except (ValueError, TypeError):
+        if drift:
+            drift.bad_lines += 1
+        return None
+    if not isinstance(payload, dict):
+        if drift:
+            drift.bad_lines += 1
+        return None
+    if drift:
+        drift.unknown_fields.extend(
+            f"iferrs.{k}" for k in payload if k not in IFERR_FIELDS
+        )
+    return payload
+
+
+def iface_error_deltas(prev: dict | None, cur: dict) -> dict:
+    """Counter deltas, treating any decrease as a reset -> 0 (schema §8).
+
+    Byte counters and error counters are handled identically: a reboot or
+    interface bounce must read as "no new errors", never as a huge negative.
+    """
+    keys = ("ierrs", "oerrs", "coll", "rx_bytes", "tx_bytes")
+    if not prev:
+        return dict.fromkeys(keys, 0)
+    return {k: max(0, cur.get(k, 0) - prev.get(k, 0)) for k in keys}
 
 
 def parse_config(text: str) -> dict[str, str]:

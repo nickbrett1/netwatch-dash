@@ -75,11 +75,13 @@ Header: `ts_iso,unixtime,target,rtt_ms`. Empty `rtt_ms` = loss. `target` ∈
 
 ```
 # start 2026-…  pid=<n> gw=<ip> net=<ip>
+# stop <ISOTS>
 # loss <ISOTS> gw
 # burst_start <ISOTS> 163.9ms
 # burst_end <ISOTS> peak=163.9ms
 # link_change <ISOTS> autoselect (1000baseT <full-duplex,…>) -> ?
 # orbi <ISOTS> {"internet":0,"internet_head":"STATUS","internet_text":"GOOD","satellites_num":3,"devices_num":28}
+# iferrs <ISOTS> {"iface":"en0","ierrs":0,"oerrs":0,"coll":0,"rx_bytes":93364822283,"tx_bytes":21108729333}
 ```
 
 - Growth ≈ **8.4 MB/day** (24 MB at capture, ~3 GB/yr). **Never parse per
@@ -88,6 +90,16 @@ Header: `ts_iso,unixtime,target,rtt_ms`. Empty `rtt_ms` = loss. `target` ∈
 - **Rotation/truncation is not handled by a persisted offset yet.** A byte
   offset is only valid while the file grows. The reader must invalidate it on
   inode change or `size < offset` (this is an open gap, not a solved one).
+
+### Drift measured against the live log
+
+The consumer was run over the **entire live log** (mac-studio,
+`~/netwatch/gateway_rtt.csv`, 2026-09-20): **510,698 lines parsed** — 501,425
+samples, 9,272 markers, 1 header, **0 bad lines**. The first run reported
+`drift.count == 2`, and both were `# stop` — a marker the writer has always
+emitted but this schema had never listed. It is now listed. A clean run is the
+invariant to hold: any non-zero drift against real data means producer and
+schema have separated, and the number is surfaced in `/healthz`.
 
 ## 4. Small state files
 
@@ -165,13 +177,21 @@ but not a path-latency trend. Either accept that, or pull the rollup forward.
 Nothing records en0 `Ierrs/Oerrs/Coll` today, so "is the hardware failing?" is a
 hand-run snapshot in the dashboard's only trend. Spec:
 
-- **Where:** `gwping.py`, on the existing `# orbi` cadence (or a new
-  `# iferrs` marker line in the CSV). Same writer, same file, no new daemon.
+- **Where:** `gwping.py`, on the existing `# orbi` cadence (60s), as its own
+  `# iferrs` marker line in the CSV. Same writer, same file, no new daemon.
 - **Shape:** `# iferrs <ISO-ts> {"iface":"en0","ierrs":0,"oerrs":0,"coll":0,"rx_bytes":…,"tx_bytes":…}`
-- **Rules:** monotonic counters — the dashboard must store **deltas**, never the
-  raw value, and must treat a decrease (interface reset / counter wrap) as a
-  reset, not a negative rate. Field set is additive; the tolerant parser
-  ignores it until a fixture exists.
+- **Rules:** the producer writes **raw, since-boot** counters and nothing else —
+  the dashboard owns delta derivation. A decrease between samples (interface
+  reset, reboot, counter wrap) is a **reset and reads as 0 new errors**, never
+  as a negative rate; the first sample after a restart establishes a baseline
+  and also reads as 0 rather than inventing history it cannot see. Field set is
+  additive; unrecognised keys are counted as drift (`iferrs.<key>`), never
+  dropped. Reading the counters can legitimately fail (no such interface) and
+  the producer then omits the marker rather than writing a partial one.
+- **Status:** shipped 2026-09-20. Producer in `producers/gwping.py`
+  (`iface_counters`), consumer in `src/netwatch_dash/parse.py` (`parse_iferrs`,
+  `iface_error_deltas`), fixture `tests/fixtures/iferrs_sample.csv` (real bytes
+  from mac-studio en0), tests in `tests/test_parse.py`.
 - **Why it matters:** it is the one signal that directly answers "failing
   hardware" rather than inferring it, and the network analysis could only
   provide it as a point-in-time reading.
