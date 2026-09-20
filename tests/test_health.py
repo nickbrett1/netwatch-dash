@@ -238,3 +238,16 @@ def test_defaults_are_the_host_paths_and_loopback():
     assert settings.config_path == Path("/Users/nick/.config/netwatch/config")
     assert settings.tz == "America/New_York"
     assert settings.build_info_path is None
+
+
+def test_the_landing_page_is_the_drill_in(tmp_path):
+    """Clicking the tile must land on something real, not a 404."""
+    write_build_info(tmp_path)
+    client = TestClient(create_app(make_settings(tmp_path)))
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert "netwatch-dash" in response.text
+    assert "/api/localise" in response.text  # the history it draws

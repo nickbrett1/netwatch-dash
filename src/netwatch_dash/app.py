@@ -24,8 +24,10 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import FastAPI, Query
+from fastapi.responses import HTMLResponse
 
 from . import buildinfo, csvrollup, snapshot
+from .landing import LANDING_HTML
 from .settings import PROJECT, Settings
 
 # How many records a collection endpoint returns when nobody asked for a number.
@@ -107,6 +109,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def snap(now: datetime | None = None) -> snapshot.Snapshot:
         return snapshot.build_with_csv(app.state.settings, app.state.csv, now)
+
+    @app.get("/", response_class=HTMLResponse)
+    def landing() -> str:
+        """The drill-in: the verdict, and the per-minute history behind it.
+
+        The homepage tile is a summary; clicking it opens this, which fetches the
+        app's own JSON rather than re-deriving anything (see landing.py).
+        """
+        return LANDING_HTML
 
     @app.get("/healthz")
     def healthz() -> dict:
