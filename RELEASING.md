@@ -69,12 +69,6 @@ names, ship one file per platform, sign or notarise, or add a launcher manifest.
 It packages `dist/` by default, and produces no assets if there is nothing
 there.
 
-> **This project no longer does that.** `scripts/release-artifacts.sh` here packs
-> a launcher-shaped payload with a bundled arm64 CPython, published under the
-> declared triple `aarch64-apple-darwin`. See `docs/release-payload.md` for what
-> it builds and `docs/genproj-target-gap.md` for why the label is a declaration
-> and not a filename.
-
 Asset **names** are a contract: anything fetching
 `releases/latest/download/<name>` depends on the exact string, so treat a name
 as frozen once something consumes it.
@@ -92,14 +86,22 @@ It lists one entry per attached artifact, keyed by **target**:
 
 | Key | Meaning |
 | --- | --- |
-| a Rust triple (`aarch64-apple-darwin`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`) | A binary for that architecture and C library |
+| a Rust triple (`aarch64-apple-darwin`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`) | An artifact that runs only on that architecture and C library — either one build of a **matrix** (a rust project's `github-release.targets`) or one **single** platform-specific artifact (any language's `github-release.target`, e.g. a Python app that bundles its own interpreter) |
 | `any` | An architecture-independent payload (a JS bundle, a pure-python `.pyz`) |
 
 Each entry carries the asset `file` name and its `sha256`. A launcher reads the
 manifest, picks the first key matching its host, downloads `file` and verifies
-the hash — it never constructs an asset name. Labels are the Rust triples only:
-the triple is what `cargo --target` takes, and every Linux target here is musl,
-so one binary runs on a musl host and a glibc host alike.
+the hash — it never constructs an asset name. A key is a Rust triple because the
+triple is both what `cargo --target` takes and what names the architecture a
+launcher runs on, and every Linux target here is musl, so one binary runs on a
+musl host and a glibc host alike.
+
+Publishing under `any` **asserts the payload runs anywhere.** If what executes
+it is platform-specific — a bundled interpreter, a vendored Node or JRE — keying
+it `any` makes an Intel or Linux host install a binary it cannot exec: the
+sha256 still matches, so nothing fails until the `exec`. Declare
+`github-release.target` and the label tells the truth; a host that cannot run
+that triple resolves nothing and fails open instead.
 
 **An asset name must not embed a version.** Version and hash live in the
 manifest; the name carries the target only. `manifest.json` is written last so
@@ -117,11 +119,10 @@ what ships.
 ## Prerequisites
 
 - A release-write token, resolved at run time and never stored in the
-  repository: with the `doppler` capability selected, the release step reads
-  `GITHUB_RELEASE_TOKEN` from the `common` Doppler project (`prd` config); the
-  agent forwards only `DOPPLER_TOKEN` into the container.
-- Without `doppler`, the step expects `GH_TOKEN` in the agent's environment —
-  the same fleet-side contract the deploy step uses for `CLOUDFLARE_*`.
+  repository: the release step reads `GITHUB_RELEASE_TOKEN` from the `common`
+  Doppler project (`prd` config), and the agent forwards only `DOPPLER_TOKEN`
+  into the container. `github-release` requires the `doppler` capability, so
+  this plumbing is always present in a release project.
 
 ## What this does not do
 

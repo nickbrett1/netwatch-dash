@@ -20,6 +20,15 @@ deployment capability adds its deploy step, `gitguardian` adds the secret scan,
 `lighthouse-ci` adds the performance gate. A project that selects none of them
 gets build and test and nothing else.
 
+A `github-release` project with a target ending in `-apple-darwin` also gets a
+**smoke gate**: a native macOS step that runs the built payload
+(`scripts/smoke-launch.sh`, which is yours) and that the release depends on. A
+payload is built on the Mac host because that is where it can be linked, but
+_linking_ is not _running_ — this step is what stops a payload that cannot start
+from being published. It fails closed: a payload missing its `bin/` entry point,
+built for the wrong architecture, or that does not answer within the timeout
+blocks the release rather than shipping.
+
 ## What the agent has to provide
 
 None of this lives in the repository, and the pipeline fails in confusing ways
@@ -39,7 +48,11 @@ without it:
    That step also ignores `buildkite.queue`: it is dispatched to the macOS queue
    (`mac-studio-linux`, which names the queue's containers rather than its
    hosts), because moving `buildkite.queue` to a Linux queue must not move a
-   build that cannot run there.
+   build that cannot run there. The **smoke gate** below runs the same way —
+   native, on the macOS queue — so whatever executes the payload (`bin/` in
+   `scripts/smoke-launch.sh`) has to be on that host too, and the step fetches
+   the build's artifacts with `buildkite-agent`, which a native step can do and a
+   containerised one cannot.
 4. **Secrets, delivered to the job environment** by the agent's `environment`
    hook. A step-level `env:` value does **not** reach the container — only names
    listed in the docker plugin's `environment:` list do. This is the most common
