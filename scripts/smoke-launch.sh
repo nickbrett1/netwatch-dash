@@ -65,8 +65,18 @@ workdirs=()
 cleanup() {
   local d
   for d in "${workdirs[@]:-}"; do
-    [ -n "$d" ] && rm -rf "$d"
+    # `if`, not `[ -n "$d" ] && rm -rf "$d"`: with an empty array the expansion is
+    # one empty string, and a bare `[ -n "" ] && …` is the loop's last command,
+    # so it returns 1 and — because this runs as an EXIT trap — becomes the
+    # SCRIPT's exit status. That is not hypothetical: it is how the gate reported
+    # "all payloads ran" and then exited 1, once the pipeline started handing it
+    # an already-assembled root (so nothing ever appended to `workdirs`). A
+    # cleanup hook must not be able to fail the thing it is cleaning up after.
+    if [ -n "$d" ]; then
+      rm -rf "$d"
+    fi
   done
+  return 0
 }
 trap cleanup EXIT
 
