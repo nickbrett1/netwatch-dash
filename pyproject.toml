@@ -12,7 +12,12 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
-    "ruff>=0.4"
+    "ruff>=0.4",
+    # Starlette's TestClient is an httpx2 client. `httpx` still works but warns
+    # (StarletteDeprecationWarning, starlette 1.6.0), so depend on the one the
+    # library actually wants. Not generator-owned — re-apply after a regen
+    # (docs/genproj-target-gap.md §7, trap 7).
+    "httpx2>=2.13"
 ]
 
 [build-system]

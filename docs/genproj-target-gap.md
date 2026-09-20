@@ -222,7 +222,7 @@ resolves that triple first (`Darwin`/`arm64` -> `["aarch64-apple-darwin",
 "any"]`), and the singular target deliberately does **not** create a build
 matrix - the pipeline still runs one build step uploading `dist/**`.
 
-### Six traps to know before regenerating
+### Seven traps to know before regenerating
 
 1. **A regen does not refresh `scripts/release-artifacts.sh`.** Under
    `src/generator/genproj-overwrite.js`, `scripts/` is app-owned and a diverged
@@ -270,6 +270,13 @@ matrix - the pipeline still runs one build step uploading `dist/**`.
    readers at this project's payload shape. It is infra, so the pointer goes with
    it; re-add it after a regen. Everything durable lives in `docs/`, which
    genproj does not emit and a regen does not touch.
+7. **A regen overwrites `pyproject.toml`'s `[project.optional-dependencies] dev`
+   list**, which is where the test dependencies live. `pytest` and `ruff` come
+   back; anything the app's own tests need does not. Today that is `httpx2`
+   (Starlette's `TestClient` is an httpx2 client — with plain `httpx` it still
+   runs, but emits a `StarletteDeprecationWarning`; starlette 1.6.0), so the
+   endpoint tests are unbuildable after a regen until it is re-added. Same
+   mechanism as trap 2, different list.
 
 ## 8. Second gap: a smoke gate that assumes the build step produced the payload
 

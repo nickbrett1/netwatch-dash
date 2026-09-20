@@ -300,7 +300,16 @@ genproj's generated step, not something this project chose.
   `~/netwatch/` and `~/.local/bin/`. That is the "co-release, co-adopt" half of
   D1, and it overwrites files on the alerting path, so it is a deliberate
   decision rather than a follow-up (memo v3 §6.1).
-- **`/healthz` does not read `build-info.json` yet** — the FastAPI app does not
-  exist. The file is written and its shape is fixed by what `/healthz` owes.
-  `bin/netwatch-dash --version` / `--help` are answered today (that is what the
-  smoke gate probes); the app's own behaviour is not implemented.
+- **`/healthz` reads `build-info.json` and stops there.** It reports the
+  payload's identity, the producer comparison and the whitelisted config
+  (`docs/app.md`); the status is deliberately `unknown` until the readers land,
+  and `data.drift_count` is `null` for the same reason. `bin/netwatch-dash
+  --version` / `--help` are answered before the ASGI stack is imported, which is
+  what the smoke gate probes; no endpoint reads `events.jsonl` or the CSV yet.
+- **The smoke gate runs the payload but does not serve it.** The generated step
+  runs `build-payload.sh` → `smoke-launch.sh`, and the gate exercises
+  `--version`. Starting the app and curling `/healthz` on the assembled payload —
+  with a temp `HOME` and a loopback port, so it cannot touch the live alerting
+  state or collide with the real service on 8791 (memo v3 §7) — is the remaining
+  half, and it is `scripts/smoke-launch.sh`'s to add (app-owned, so it survives a
+  regen).
