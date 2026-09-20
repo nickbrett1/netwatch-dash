@@ -116,10 +116,16 @@ ALERT_COOLDOWN  DL_WARN_MBPS  NET_PEER  NOTIFY_MACOS  NTFY_TOPIC  RTT_ALERT
 RTT_WARN_CONSEC  RTT_WARN_MS  SAT_LOAD  SAT_MBPS  UL_WARN_MBPS
 ```
 
-The dashboard reads **only** `RTT_WARN_MS`, `RTT_WARN_CONSEC`, `DL_WARN_MBPS`,
-`UL_WARN_MBPS`, `ALERT_COOLDOWN`, `NET_PEER` and `RTT_ALERT`. **`NTFY_TOPIC` is
-never read and must never appear in any response.** A test asserts the whitelist
-cannot surface it.
+The dashboard reads **only** `RTT_WARN_MS`, `RTT_EXCESS_MS`, `RTT_WARN_CONSEC`,
+`DL_WARN_MBPS`, `UL_WARN_MBPS`, `ALERT_COOLDOWN`, `NET_PEER` and `RTT_ALERT`.
+**`NTFY_TOPIC` is never read and must never appear in any response.** A test
+asserts the whitelist cannot surface it.
+
+`RTT_EXCESS_MS` is the dashboard's own key, agreed 2026-09-20 (§7): the
+dashboard reads it out of the producer's config file rather than managing a
+second one, and the producer ignores it. It is a judgement about a WAN, so the
+host sets it and the dashboard invents no default — an absent key is reported as
+absent (schema §6) and simply skips that comparison.
 
 `RTT_ALERT` arrived on 2026-09-20 with the decision to stop treating gateway
 ICMP as a health signal (§7); the producer defaults it to `off`, so it logs RTT
@@ -152,7 +158,7 @@ network (confirmed: an `rtt` alert fired 2026-09-20T12:54Z).
 | Signal | Source | Cadence | Role |
 | --- | --- | --- | --- |
 | **Packet loss** | probe `loss_pct`; empty `rtt_ms` in the CSV | 300 s / 1–5 s | **Health** — trusted across every path |
-| **Forwarded-path RTT** | CSV `net` (1.1.1.1), `wire` | 5 s / 1 s | **Health** — replaces gw as the latency canary |
+| **Forwarded-path RTT** | CSV `net` (1.1.1.1), `wire` | 5 s / 1 s | **Health** — replaces gw as the latency canary; judged on its excess over `gw`, §7.1 |
 | **Link rate** | probe `media` + `# link_change` | 300 s | **Health** — renegotiation / bad-cable canary |
 | **en0 error counters** | *not recorded yet — see §8* | — | **Health (missing)** — the direct hardware answer |
 | **Throughput** | `kind:speed`; optional Mac↔peer iperf3 | daily | **Health** — capacity; the recommended gw-ICMP replacement |
@@ -164,13 +170,56 @@ network (confirmed: an `rtt` alert fired 2026-09-20T12:54Z).
 ### Status derivation (revises memo v2 §3.2)
 
 `crit` if loss > 0 on any probe **or** link ≠ 1000baseT **or** forwarded-path RTT
-(`net`/`wire`) above threshold **or** probe stale **or** en0 errors > 0.
-`warn` if forwarded RTT elevated, `rtt_streak > 0`, or throughput below
-threshold. **Gateway RTT is not an input.** It is rendered as a labelled
-diagnostic ("router CPU") so the localisation panel still attributes *where* a
-fault is — but a `gw` spike with `wire` flat now reads as **benign router
-control plane**, not "fault at the router LAN port". That inversion is a change
-to the panel legend, not just a threshold.
+(`net`/`wire`) **at fault** (§7.1) **or** probe stale **or** en0 errors > 0.
+`warn` if the forwarded path is at fault but not `crit`, `rtt_streak > 0`, or
+throughput below threshold. **Gateway RTT is not an input.** It is rendered as a
+labelled diagnostic ("router CPU") so the localisation panel still attributes
+*where* a fault is — but a `gw` spike with `wire` flat now reads as **benign
+router control plane**, not "fault at the router LAN port". That inversion is a
+change to the panel legend, not just a threshold.
+
+### 7.1 What "forwarded path at fault" means (2026-09-20)
+
+The forwarded path is `gateway + transit`, so the gateway's own echo-reply
+latency is *inside* the number. Judging it absolutely therefore judges the
+router as much as the WAN, and the size of that mistake is measurable: on
+mac-studio the forwarded path never went below **5.42 ms** in 120 consecutive
+minutes, while `RTT_WARN_MS=4.0` was the threshold — so the rule fired on
+**120 of 120** minutes and the verdict said the same thing forever. The doc
+above had already identified the cause ("the Orbi's own echo reply floor is
+~1.75 ms spiking to 76 ms") and then set the ceiling *below* the path's floor.
+
+Two conditions now, and their names are what the panel reports
+(`reading.fault`):
+
+| Condition | Test | Names |
+| --- | --- | --- |
+| `beyond-router` | `net − gw > RTT_EXCESS_MS` | the WAN leg — the fault §7's prose describes |
+| `path-ceiling` | `net > RTT_WARN_MS` | the whole path, router included |
+
+- The **residual** `net − gw` cancels the router out, so its floor is ~0 ms on a
+  healthy WAN whatever the router is doing. It is the primary signal.
+- `RTT_WARN_MS` keeps its literal meaning — a ceiling on the forwarded path —
+  and is a **backstop** for a path that is slow everywhere, not only beyond the
+  router. It must clear the path's own floor to be a threshold at all.
+- Both samples must come from the **same source**: the residual subtracts the
+  *csv's* gateway (1 s cadence) from the csv's forwarded path, never the probe's
+  300 s `rtt_ms`, which is minutes of router jitter away.
+- A missing threshold skips that comparison; it is never a comparison against
+  zero. A missing gateway skips the residual and leaves the ceiling.
+- **A gateway spike can no longer raise the status by construction**: it only
+  *shrinks* the residual. §7's invariant is preserved by mechanism rather than
+  by ignoring the input.
+
+Calibration on mac-studio, 120 minutes (2026-09-20): residual p50 3.4 ms, p95
+7.1 ms, worst 81 ms. Host values `RTT_EXCESS_MS=10`, `RTT_WARN_MS=25` give a
+**4 % dwell (5/120)** — three genuine beyond-router minutes and two where the
+router was itself slow — against the old rule's 100 %. Both numbers are above
+every normal minute measured and below every real event.
+
+The identical test lives in `parse.path_fault` and is used by both
+`derive_status` and the panel's `reading`, so the status and the sentence
+explaining it cannot disagree.
 
 ### Sequencing consequence
 

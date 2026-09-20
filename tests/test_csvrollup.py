@@ -6,6 +6,8 @@ import os
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from netwatch_dash import csvrollup, snapshot
 from netwatch_dash.app import healthz_body
 from netwatch_dash.settings import Settings
@@ -17,7 +19,11 @@ END_OF_WINDOW = datetime(2026, 9, 17, 17, 12, 0, tzinfo=UTC)
 
 
 def make_settings(
-    tmp_path: Path, csv_text: str | None = None, *, retention_s: str | None = None
+    tmp_path: Path,
+    csv_text: str | None = None,
+    *,
+    retention_s: str | None = None,
+    config_text: str | None = None,
 ) -> Settings:
     home = tmp_path
     state = home / ".local/state/netwatch"
@@ -26,8 +32,16 @@ def make_settings(
     if csv_text is not None:
         (home / "netwatch/gateway_rtt.csv").write_text(csv_text, encoding="utf-8")
     (home / ".config/netwatch").mkdir(parents=True, exist_ok=True)
+    # The host's own numbers, as deployed: the forwarded-path verdict is the
+    # residual's, with RTT_WARN_MS only as a backstop, so the fixtures have to
+    # carry a ceiling that clears the path's real 5-7 ms floor. A fixture at
+    # RTT_WARN_MS=4.0 would pass every test here while painting the live tile
+    # amber on 120 of 120 minutes.
     (home / ".config/netwatch/config").write_text(
-        "RTT_WARN_MS=4.0\nDL_WARN_MBPS=250\n", encoding="utf-8"
+        config_text
+        if config_text is not None
+        else "RTT_WARN_MS=25.0\nRTT_EXCESS_MS=10.0\nDL_WARN_MBPS=250\n",
+        encoding="utf-8",
     )
     env = {"NETWATCH_DASH_HOME": str(home)}
     if retention_s is not None:
@@ -224,7 +238,15 @@ def test_the_cache_seeds_once_and_then_reads_only_what_is_new(tmp_path):
 
 
 def test_the_csv_takes_over_the_status_inputs_it_owns(tmp_path):
-    """Forwarded RTT, csv loss and en0 errors are inputs now, and are named."""
+    """Forwarded RTT, csv loss and en0 errors are inputs now, and are named.
+
+    The captured window ends four minutes before `now`, so it speaks for the
+    link: `net` is 6.593 ms. That is *not* a fault. At this host's thresholds the
+    path's own floor (5-7 ms measured) sits under a 25 ms ceiling and under
+    10 ms of excess over the gateway — the regression this pins is the old rule
+    `net > RTT_WARN_MS=4.0`, which called 120 of 120 live minutes a warning and
+    so said nothing at all.
+    """
     settings = make_settings(tmp_path, fixture_csv())
     settings.state_dir.mkdir(parents=True, exist_ok=True)
     (settings.state_dir / "events.jsonl").write_text(
@@ -237,21 +259,54 @@ def test_the_csv_takes_over_the_status_inputs_it_owns(tmp_path):
     snap = snapshot.build_with_csv(settings, cache, END_OF_WINDOW)
 
     inputs = snap.status_inputs()
-    # The captured window ends four minutes before `now`, so it speaks for the
-    # link: the forwarded path (net) is an input, judged against the host's own
-    # RTT_WARN_MS — and 6.593 ms is above 4.0, hence the warning.
     assert snap.csv_current is True
     assert inputs["forwarded_rtt_ms"] == 6.593
-    assert inputs["forwarded_warn_ms"] == 4.0  # the host's RTT_WARN_MS
-    assert snap.status == "warn"
-    assert any("forwarded-path RTT" in r for r in snap.status_reason())
+    assert inputs["forwarded_warn_ms"] == 25.0  # the host's RTT_WARN_MS
+    assert inputs["forwarded_excess_ms"] == 10.0  # the host's RTT_EXCESS_MS
+    # The residual is measured against the csv's gateway, same file and minute —
+    # not the probe's 300 s reading, which is five minutes of router jitter away.
+    assert inputs["forwarded_gw_rtt_ms"] == snap.csv_gw_rtt_ms
+    assert snap.status == "ok"
+    assert not any("forwarded-path RTT" in r for r in snap.status_reason())
 
 
-def test_a_current_reading_above_the_host_threshold_is_a_warning(tmp_path):
+def test_a_healthy_path_is_quiet_under_a_realistic_ceiling(tmp_path):
+    """The bug this exists to prevent: a threshold below the path's own floor.
+
+    mac-studio 2026-09-20: `net` never went under 5.4 ms in 120 minutes, so
+    RTT_WARN_MS=4.0 fired on all of them. A verdict that never changes carries no
+    information, so the test asserts the quiet case at a ceiling that clears the
+    floor — and asserts the loud case, so "quiet" is a decision and not a typo.
+    """
+    moment = int(END_OF_WINDOW.timestamp())
+    row = "2026-09-17T17:11:00.000,{}.0,net,6.6\n2026-09-17T17:11:00.000,{}.0,gw,3.9\n"
+    settings = make_settings(tmp_path, row.format(moment, moment))
+    settings.state_dir.mkdir(parents=True, exist_ok=True)
+    (settings.state_dir / "events.jsonl").write_text(
+        '{"ts":"2026-09-17T17:11:00Z","kind":"probe","rtt_ms":2.0,"loss_pct":0.0,'
+        '"media":"1000baseT full-duplex"}\n',
+        encoding="utf-8",
+    )
+    cache = csvrollup.RollupCache()
+    cache.refresh(settings, now_epoch=END_OF_WINDOW.timestamp())
+    snap = snapshot.build_with_csv(settings, cache, END_OF_WINDOW)
+
+    assert snap.csv_gw_rtt_ms == 3.9
+    assert snap.status == "ok"
+    reading = snap.localise()["reading"]
+    assert reading["verdict"] == "no hop implicated"
+    assert reading["fault"] is None
+    assert reading["numbers"]["excess"] == pytest.approx(6.6 - 3.9)
+
+
+def test_a_forwarded_path_above_the_ceiling_is_a_warning(tmp_path):
+    """One of the two conditions: the whole path, router included, is slow."""
+    moment = int(END_OF_WINDOW.timestamp())
     settings = make_settings(
         tmp_path,
         "ts_iso,unixtime,target,rtt_ms\n"
-        f"2026-09-17T17:11:00.000,{int(END_OF_WINDOW.timestamp())}.0,net,9.5\n",
+        f"2026-09-17T17:11:00.000,{moment}.0,net,30.0\n",
+        config_text="RTT_WARN_MS=25.0\nRTT_EXCESS_MS=10.0\n",
     )
     settings.state_dir.mkdir(parents=True, exist_ok=True)
     (settings.state_dir / "events.jsonl").write_text(
@@ -263,9 +318,77 @@ def test_a_current_reading_above_the_host_threshold_is_a_warning(tmp_path):
     cache.refresh(settings, now_epoch=END_OF_WINDOW.timestamp())
     snap = snapshot.build_with_csv(settings, cache, END_OF_WINDOW)
 
-    assert snap.status_inputs()["forwarded_rtt_ms"] == 9.5
     assert snap.status == "warn"
-    assert any("forwarded-path RTT" in r for r in snap.status_reason())
+    # No gateway sample in the csv, so only the ceiling could have fired — and
+    # the reason says so rather than guessing which hop is at fault.
+    assert any(
+        "above the host's RTT_WARN_MS=25" in r for r in snap.status_reason()
+    ), snap.status_reason()
+
+
+def test_the_excess_beyond_the_router_is_a_warning_on_its_own(tmp_path):
+    """The other condition, and the one §7's prose actually describes.
+
+    The ceiling is set high enough that it cannot fire, so only the residual can
+    be responsible: 30 ms to 1.1.1.1 against a 3 ms gateway is 27 ms of WAN.
+    """
+    moment = int(END_OF_WINDOW.timestamp())
+    settings = make_settings(
+        tmp_path,
+        "ts_iso,unixtime,target,rtt_ms\n"
+        f"2026-09-17T17:11:00.000,{moment}.0,net,30.0\n"
+        f"2026-09-17T17:11:00.000,{moment}.0,gw,3.0\n",
+        config_text="RTT_WARN_MS=100.0\nRTT_EXCESS_MS=10.0\n",
+    )
+    settings.state_dir.mkdir(parents=True, exist_ok=True)
+    (settings.state_dir / "events.jsonl").write_text(
+        '{"ts":"2026-09-17T17:11:00Z","kind":"probe","rtt_ms":2.0,"loss_pct":0.0,'
+        '"media":"1000baseT full-duplex"}\n',
+        encoding="utf-8",
+    )
+    cache = csvrollup.RollupCache()
+    cache.refresh(settings, now_epoch=END_OF_WINDOW.timestamp())
+    snap = snapshot.build_with_csv(settings, cache, END_OF_WINDOW)
+
+    assert snap.status == "warn"
+    reasons = snap.status_reason()
+    assert any("27.0ms beyond the router" in r for r in reasons), reasons
+    reading = snap.localise()["reading"]
+    assert reading["verdict"] == "forwarded path"
+    assert reading["fault"] == "beyond-router"
+    assert reading["numbers"]["excess"] == 27.0
+
+
+def test_a_router_spike_is_judged_on_the_csv_gateway_not_the_probe(tmp_path):
+    """The residual needs two samples from the same minute.
+
+    A 500 ms *probe* reading is five minutes and a whole world of router jitter
+    away from a 1 s csv sample; subtracting it would invent a 43 ms WAN delay
+    that no two adjacent measurements support. §7's invariant is preserved and
+    made computable: the gateway still cannot raise the status — here it lowers
+    the residual to nothing.
+    """
+    moment = int(END_OF_WINDOW.timestamp())
+    settings = make_settings(
+        tmp_path,
+        "ts_iso,unixtime,target,rtt_ms\n"
+        f"2026-09-17T17:11:00.000,{moment}.0,net,6.0\n"
+        f"2026-09-17T17:11:00.000,{moment}.0,gw,3.0\n",
+        config_text="RTT_WARN_MS=25.0\nRTT_EXCESS_MS=10.0\n",
+    )
+    settings.state_dir.mkdir(parents=True, exist_ok=True)
+    (settings.state_dir / "events.jsonl").write_text(
+        '{"ts":"2026-09-17T17:11:00Z","kind":"probe","rtt_ms":500.0,"loss_pct":0.0,'
+        '"media":"1000baseT full-duplex"}\n',
+        encoding="utf-8",
+    )
+    cache = csvrollup.RollupCache()
+    cache.refresh(settings, now_epoch=END_OF_WINDOW.timestamp())
+    snap = snapshot.build_with_csv(settings, cache, END_OF_WINDOW)
+
+    assert snap.status_inputs()["gw_rtt_ms"] == 500.0  # still carried, for display
+    assert snap.status == "ok"
+    assert snap.localise()["reading"]["numbers"]["excess"] == 3.0
 
 
 def test_a_gateway_spike_with_a_flat_path_is_localised_to_the_router(tmp_path):
@@ -322,6 +445,15 @@ def test_the_panels_answer_over_http(tmp_path):
     incidents = client.get("/api/incidents").json()
     assert incidents["counts"]["bursts"] == 1
     assert incidents["bursts"][0]["open"] is False
+
+    # The drill-in reads the fault and both thresholds from this one payload
+    # rather than re-deciding the rule in JavaScript.
+    localise = client.get("/api/localise").json()
+    assert localise["thresholds"] == {"rtt_warn_ms": 25.0, "rtt_excess_ms": 10.0}
+    assert "fault" in localise["reading"]
+    assert "excess" in localise["reading"]["numbers"]
+    summary = client.get("/api/summary").json()
+    assert summary["status_inputs"]["forwarded_excess_ms"] == 10.0
 
 
 def test_a_burst_that_never_ended_is_reported_as_open(tmp_path):

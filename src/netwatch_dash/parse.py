@@ -49,6 +49,10 @@ CONFIG_WHITELIST = frozenset(
     {
         "RTT_WARN_MS",
         "RTT_WARN_CONSEC",
+        # The dashboard's own addition, 2026-09-20: the excess over the gateway
+        # above which the forwarded path is at fault. A judgement about a WAN, so
+        # the host sets it — the dashboard invents no default (schema §7).
+        "RTT_EXCESS_MS",
         "DL_WARN_MBPS",
         "UL_WARN_MBPS",
         "ALERT_COOLDOWN",
@@ -241,6 +245,65 @@ def media_is_gigabit(media: object) -> bool:
     return isinstance(media, str) and "1000bas" in media.lower()
 
 
+# The two ways the forwarded path can be at fault, from `path_fault`.
+BEYOND_ROUTER = "beyond-router"
+PATH_CEILING = "path-ceiling"
+
+
+def path_excess_ms(
+    forwarded_rtt_ms: float | None, gateway_rtt_ms: float | None
+) -> float | None:
+    """How much of the forwarded-path RTT the router cannot account for.
+
+    The forwarded path is `gateway + transit`, so subtracting the gateway's own
+    echo reply cancels the router out of the number and leaves the leg that is
+    actually beyond it. Its floor is ~0 ms on a healthy WAN whatever the router
+    is doing, which is the property the absolute RTT does not have: measured on
+    mac-studio 2026-09-20, the router's floor is 2.5 ms and its spikes reach
+    50 ms, so it alone can put the forwarded path over any threshold close to
+    the path's own 5–7 ms band.
+
+    None when either hop is missing — a residual needs both ends.
+    """
+    if forwarded_rtt_ms is None or gateway_rtt_ms is None:
+        return None
+    return forwarded_rtt_ms - gateway_rtt_ms
+
+
+def path_fault(
+    *,
+    forwarded_rtt_ms: float | None,
+    gateway_rtt_ms: float | None,
+    ceiling_ms: float | None,
+    excess_ms: float | None,
+) -> str | None:
+    """Which condition, if any, puts the forwarded path at fault.
+
+    Two independent conditions, because they name different faults:
+
+    - ``BEYOND_ROUTER`` — the path sits more than `excess_ms` above the router,
+      so the delay is out on the WAN. This is the primary signal and the one
+      §7's prose describes.
+    - ``PATH_CEILING`` — the whole path, router included, is above
+      `ceiling_ms`. Judging the path absolutely is still worth having, but the
+      ceiling has to clear the router's own floor or it is not a threshold at
+      all: at RTT_WARN_MS=4.0 on mac-studio it fired on 120 of 120 minutes
+      (the path's *minimum* was 5.4 ms), which made the verdict a constant.
+
+    A missing threshold means the comparison cannot be made and is skipped —
+    never made against zero, which would call every reading above 0 ms a fault.
+    """
+    if forwarded_rtt_ms is None:
+        return None
+    if excess_ms is not None:
+        excess = path_excess_ms(forwarded_rtt_ms, gateway_rtt_ms)
+        if excess is not None and excess > excess_ms:
+            return BEYOND_ROUTER
+    if ceiling_ms is not None and forwarded_rtt_ms > ceiling_ms:
+        return PATH_CEILING
+    return None
+
+
 def derive_status(
     *,
     loss_pct: float | None,
@@ -253,6 +316,8 @@ def derive_status(
     en0_errors: int | None = None,
     rtt_streak: int | None = None,
     gw_rtt_ms: float | None = None,
+    forwarded_excess_ms: float | None = None,
+    forwarded_gw_rtt_ms: float | None = None,
     dl_mbps: float | None = None,
     ul_mbps: float | None = None,
     dl_warn_mbps: float | None = None,
@@ -262,9 +327,14 @@ def derive_status(
 ) -> str:
     """Status from the health signals only.
 
-    `gw_rtt_ms` is accepted **for display** and deliberately ignored: gateway
+    `gw_rtt_ms` is accepted **for display** and is never authoritative: gateway
     ICMP measures the router's control-plane CPU, not the path (schema §7), so
-    it must never move the status. Pinned by a test.
+    it must never move the status on its own. Pinned by a test.
+
+    `forwarded_gw_rtt_ms` is the *other* gateway number — the csv's, paired with
+    `forwarded_rtt_ms` — and it is the residual's baseline rather than a signal.
+    Subtracting it cannot break the invariant above: a router spike only
+    *shrinks* the residual, so it can never raise a status.
     """
     if loss_pct is None and link_ok is None and probe_age_s is None:
         return "unknown"
@@ -283,11 +353,16 @@ def derive_status(
     # §7: the forwarded path replaces the gateway as the latency canary. Both
     # sides optional, and a missing threshold means no comparison is possible —
     # which must not become a comparison against zero, or every reading over 0 ms
-    # would be a warning.
+    # would be a warning. The test itself is `path_fault`'s, shared with the
+    # panel's verdict so the status and the explanation cannot disagree.
     if (
-        forwarded_rtt_ms is not None
-        and forwarded_warn_ms is not None
-        and forwarded_rtt_ms > forwarded_warn_ms
+        path_fault(
+            forwarded_rtt_ms=forwarded_rtt_ms,
+            gateway_rtt_ms=forwarded_gw_rtt_ms,
+            ceiling_ms=forwarded_warn_ms,
+            excess_ms=forwarded_excess_ms,
+        )
+        is not None
     ):
         return "warn"
     if rtt_streak:

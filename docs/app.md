@@ -74,7 +74,7 @@ dashboard; a file it cannot read is a *reported absence*.
             "built_at": "…", "python": {…}, "wheel": {…}, "dependencies": {…}},
   "producers": {"shipped": {…}, "installed": {…}, "skew": [], "missing": ["netwatch"]},
   "launcher": {"found": true, "path": "…/fetch-launch.sh", "version": "0.1.18", "sha256": "…"},
-  "config": {"RTT_ALERT": "off", "RTT_WARN_MS": "4.0"},
+  "config": {"RTT_ALERT": "off", "RTT_WARN_MS": "25.0", "RTT_EXCESS_MS": "10.0"},
   "config_error": null,
   "data": {"drift_count": 0, "drift": {"unknown_fields": [], "bad_lines": 0, …}},
   "sources": {"events": {…}, "config": {…}, "csv": {"read": false, "reason": "…"}},
@@ -124,7 +124,7 @@ Five things it says, and why each is shaped the way it is:
 | `/api/probe` | the most recent `kind: "probe"` events (oldest first), `?limit=` 1–1000 | **2 — built** |
 | `/api/speed` | the most recent `kind: "speed"` events | **2 — built** |
 | `/api/link` | `media` history and the `# link_change` markers — renegotiation / bad-cable | 3 |
-| `/api/localise` | which segment is at fault: the csv targets (`gw`/`wire`/`wl`/`net`) and `# iferrs` deltas | 3 |
+| `/api/localise` | which segment is at fault: the csv targets (`gw`/`wire`/`wl`/`net`) and `# iferrs` deltas, with the `reading` verdict **and the fault condition it came from** (§7.1) | 3 |
 | `/api/incidents` | the `# loss` / `# burst_*` markers, `.last_alert`, `.rtt_streak` | 3 |
 
 `/healthz` names the ones that do not exist yet, with the reason, so a missing
@@ -174,3 +174,13 @@ an empty chart over a full file.
   *is* a status input (§7's table) — but only a current measurement: a days-old
   speed test is not evidence about the link now, so a stale one is ignored rather
   than reported as either good or bad.
+- **The forwarded path is judged on its excess over the gateway** (schema §7.1),
+  with `RTT_WARN_MS` demoted to a backstop for a path that is slow everywhere.
+  The reason is arithmetic rather than taste: the forwarded path contains the
+  router, so measuring it absolutely measures the router too. At the host's
+  original `RTT_WARN_MS=4.0` the rule fired on 120 of 120 live minutes — the
+  path's own minimum was 5.42 ms — which made the verdict constant and therefore
+  empty. The residual's floor is ~0 ms whatever the router is doing, so 10 ms
+  above the router means the WAN and nothing else. `reading.fault` names which
+  of the two conditions fired, and a gateway spike can only ever *lower* the
+  status now, because it only ever shrinks the residual.

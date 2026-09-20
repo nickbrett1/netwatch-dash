@@ -25,11 +25,15 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import csvrollup, events
 from .parse import (
+    BEYOND_ROUTER,
+    PATH_CEILING,
     derive_status,
     media_is_gigabit,
     parse_config,
     parse_last_alert,
     parse_streak,
+    path_excess_ms,
+    path_fault,
     speed_is_stale,
 )
 from .settings import Settings
@@ -159,6 +163,17 @@ class Snapshot:
         return found[1]["rtt_ms"] if found else None
 
     @property
+    def csv_gw_rtt_ms(self) -> float | None:
+        """The csv's newest gateway RTT — the baseline the residual subtracts.
+
+        Paired with `forwarded_rtt_ms` by construction: same file, same 1 s
+        cadence, same minute. `gw_rtt_ms` on `status_inputs` is deliberately a
+        different value (the probe's, every 300 s) and is never the baseline.
+        """
+        sample = self.csv.latest_of("gw")
+        return sample["rtt_ms"] if sample else None
+
+    @property
     def csv_loss_pct(self) -> float | None:
         """The worst per-minute loss in the newest minute the csv holds.
 
@@ -261,11 +276,21 @@ class Snapshot:
             "csv_loss_pct": self.csv_loss_pct,
             "link_ok": link_ok(probe),
             # §7: the forwarded path (`net` 1.1.1.1, then the wired peer) is the
-            # latency canary that replaced the gateway. Its threshold is the
-            # host's own RTT_WARN_MS, and a host that has not set one gets no
-            # comparison rather than a comparison against zero.
+            # latency canary that replaced the gateway. Two thresholds, and a
+            # host that has set neither gets no comparison rather than a
+            # comparison against zero: `RTT_EXCESS_MS` for the latency *beyond*
+            # the router (the residual, so the router's own floor cannot move
+            # the status) and `RTT_WARN_MS` as a ceiling on the whole path.
             "forwarded_rtt_ms": self.forwarded_rtt_ms,
             "forwarded_warn_ms": _config_number(self.config, "RTT_WARN_MS"),
+            "forwarded_excess_ms": _config_number(self.config, "RTT_EXCESS_MS"),
+            # The gateway number that belongs to that test: the csv's, so the
+            # residual subtracts two samples from the same file and the same
+            # minute. (`gw_rtt_ms` below is the *probe's* 300 s reading — the
+            # same quantity at a coarser cadence, and up to five minutes old, so
+            # it must not be the thing a 1 s forwarded sample is measured
+            # against.)
+            "forwarded_gw_rtt_ms": self.csv_gw_rtt_ms,
             "probe_age_s": self.probe_age_s,
             "probe_stale_s": self.settings.probe_stale_s,
             # New en0 errors observed in the csv window (§8).
@@ -373,23 +398,69 @@ class Snapshot:
             forwarded = self.forwarded_rtt
             if forwarded:
                 target, sample = forwarded
-                threshold = _config_number(self.config, "RTT_WARN_MS")
-                if threshold is not None and sample["rtt_ms"] is not None and sample["rtt_ms"] > threshold:
-                    reasons.append(
-                        f"forwarded-path RTT ({target}) is {sample['rtt_ms']:.1f}ms, "
-                        f"above the host's RTT_WARN_MS={threshold:g}"
-                    )
-                elif threshold is None:
-                    reasons.append(
-                        "the host sets no RTT_WARN_MS, so the forwarded-path RTT is "
-                        "reported but has no threshold to be judged against"
-                    )
+                self._forwarded_reasons(reasons, target, sample)
             loss = self.csv_loss_pct
             if loss:
                 reasons.append(f"loss {loss:.1f}% in the newest csv minute")
         errors = self.en0_errors
         if errors:
             reasons.append(f"{errors} new interface error(s) in the csv window")
+
+    def _forwarded_reasons(
+        self, reasons: list[str], target: str, sample: dict
+    ) -> None:
+        """Say which forwarded-path condition fired, and against which number.
+
+        A threshold that fires is only useful next to the number it fired on —
+        and, since the residual and the ceiling name different faults, next to
+        the hop it implicates.
+        """
+        ceiling = _config_number(self.config, "RTT_WARN_MS")
+        excess_limit = _config_number(self.config, "RTT_EXCESS_MS")
+        rtt = sample["rtt_ms"]
+        gateway = self.csv_gw_rtt_ms
+        excess = path_excess_ms(rtt, gateway)
+        fault = path_fault(
+            forwarded_rtt_ms=rtt,
+            gateway_rtt_ms=gateway,
+            ceiling_ms=ceiling,
+            excess_ms=excess_limit,
+        )
+        if fault is None:
+            if ceiling is None and excess_limit is None:
+                reasons.append(
+                    "the host sets neither RTT_WARN_MS nor RTT_EXCESS_MS, so the "
+                    "forwarded-path RTT is reported but has no threshold to be "
+                    "judged against"
+                )
+            elif excess is None:
+                # The residual needs both ends; without a gateway reply there is
+                # only the ceiling left, if the host set one.
+                reasons.append(
+                    "no gateway reply to subtract, so the forwarded path is judged "
+                    f"against RTT_WARN_MS={ceiling:g} alone and not against RTT_EXCESS_MS"
+                    if ceiling is not None
+                    else "no gateway reply to subtract and no RTT_WARN_MS, so the "
+                    "forwarded path has no threshold to be judged against"
+                )
+            return
+        if fault == BEYOND_ROUTER:
+            reasons.append(
+                f"forwarded-path RTT ({target}) is {rtt:.1f}ms with the gateway at "
+                f"{gateway:.1f}ms: {excess:.1f}ms beyond the router, above the "
+                f"host's RTT_EXCESS_MS={excess_limit:g}"
+            )
+            return
+        reasons.append(
+            f"forwarded-path RTT ({target}) is {rtt:.1f}ms, above the host's "
+            f"RTT_WARN_MS={ceiling:g}"
+            + (
+                f" — the router replies in {gateway:.1f}ms too, so the whole path "
+                "is slow rather than the WAN alone"
+                if gateway is not None
+                else ""
+            )
+        )
 
     def _throughput_reasons(self, reasons: list[str]) -> None:
         speed = self.speed
@@ -476,7 +547,10 @@ class Snapshot:
         series = {t: self.csv.minute_series(t, 120) for t in csvrollup.TARGETS}
         latest = {t: self.csv.latest_of(t) for t in csvrollup.TARGETS}
         return {
-            "thresholds": {"rtt_warn_ms": threshold},
+            "thresholds": {
+                "rtt_warn_ms": threshold,
+                "rtt_excess_ms": _config_number(self.config, "RTT_EXCESS_MS"),
+            },
             "targets": {
                 t: {"latest": latest[t], "minutes": series[t]} for t in csvrollup.TARGETS
             },
@@ -509,50 +583,102 @@ class Snapshot:
 
         Deliberately a comparison of the forwarded path against the gateway, not
         a threshold test on one of them: the question "is this hop at fault?" is
-        only answerable relative to the path.
+        only answerable relative to the path. `path_fault` owns the test — the
+        same one `derive_status` uses, so the status and this sentence cannot
+        disagree.
+
+        The verdict follows the residual, because that is what localises: an
+        excess beyond the router is the WAN's, and its absence means the slow hop
+        is the router, even when the forwarded path is elevated too.
         """
         def rtt(target: str) -> float | None:
             sample = latest.get(target)
             return sample["rtt_ms"] if sample else None
 
+        excess_limit = _config_number(self.config, "RTT_EXCESS_MS")
         forwarded = self.forwarded_rtt_ms
         gateway = rtt("gw")
+        excess = path_excess_ms(forwarded, gateway)
+        fault: str | None = None
+        numbers = {
+            "gw": gateway,
+            "forwarded": forwarded,
+            "excess": excess,
+            "threshold": threshold,
+            "excess_threshold": excess_limit,
+        }
         if forwarded is None or gateway is None:
             return {
                 "verdict": "unknown",
+                "fault": fault,
                 "detail": "the csv window does not hold both a gateway and a "
                 "forwarded-path sample, so no hop can be implicated",
-                "numbers": {"gw": gateway, "forwarded": forwarded, "threshold": threshold},
+                "numbers": numbers,
             }
-        numbers = {"gw": gateway, "forwarded": forwarded, "threshold": threshold}
-        if threshold is None:
+        if threshold is None and excess_limit is None:
             return {
                 "verdict": "unknown",
-                "detail": "the host sets no RTT_WARN_MS, so there is no threshold "
-                "to judge either hop against",
+                "fault": fault,
+                "detail": "the host sets neither RTT_WARN_MS nor RTT_EXCESS_MS, so "
+                "there is no threshold to judge either hop against",
                 "numbers": numbers,
             }
-        if forwarded > threshold:
+        fault = path_fault(
+            forwarded_rtt_ms=forwarded,
+            gateway_rtt_ms=gateway,
+            ceiling_ms=threshold,
+            excess_ms=excess_limit,
+        )
+        if fault == BEYOND_ROUTER:
             return {
                 "verdict": "forwarded path",
-                "detail": f"the forwarded path is {forwarded:.1f}ms, above RTT_WARN_MS"
-                f"={threshold:g}; the delay is beyond the router, so it is a path or"
-                " upstream fault",
+                "fault": fault,
+                "detail": f"the forwarded path is {forwarded:.1f}ms against a gateway"
+                f" {gateway:.1f}ms: {excess:.1f}ms of it is beyond the router, above"
+                f" RTT_EXCESS_MS={excess_limit:g}, so it is a path or upstream fault",
                 "numbers": numbers,
             }
-        if gateway > threshold:
+        if gateway > forwarded and (threshold is None or gateway > threshold):
+            # The router is the slowest hop and the path beyond it is not: §7's
+            # benign case, whatever the forwarded path reads in absolute terms.
+            detail = (
+                f"the gateway replies in {gateway:.1f}ms while the forwarded path is"
+                f" {forwarded:.1f}ms — the path sits {abs(excess):.1f}ms *below* the"
+                " hop in front of it, so the delay is the router deprioritising its"
+                " own ICMP, which §7 measured as benign for the path"
+            )
+            if fault == PATH_CEILING:
+                detail += (
+                    f" (the path is also above RTT_WARN_MS={threshold:g}, so it is"
+                    " slow in absolute terms too, just not relative to the router)"
+                )
             return {
                 "verdict": "router control plane",
-                "detail": f"the gateway replies in {gateway:.1f}ms while the forwarded"
-                f" path is {forwarded:.1f}ms (both against RTT_WARN_MS={threshold:g}):"
-                " the router is deprioritising its own ICMP, which §7 measured as"
-                " benign for the path",
+                "fault": fault,
+                "detail": detail,
+                "numbers": numbers,
+            }
+        if fault == PATH_CEILING:
+            return {
+                "verdict": "whole path",
+                "fault": fault,
+                "detail": f"the forwarded path is {forwarded:.1f}ms, above"
+                f" RTT_WARN_MS={threshold:g}, and only {excess:.1f}ms of that is"
+                f" beyond the router (RTT_EXCESS_MS={excess_limit:g} not met): the"
+                " router is slow *and* so is the path, so this is not the WAN alone",
                 "numbers": numbers,
             }
         return {
             "verdict": "no hop implicated",
-            "detail": f"gateway {gateway:.1f}ms and forwarded path {forwarded:.1f}ms are"
-            f" both within RTT_WARN_MS={threshold:g}",
+            "fault": fault,
+            "detail": f"gateway {gateway:.1f}ms and forwarded path {forwarded:.1f}ms"
+            f" ({(excess if excess is not None else 0):.1f}ms beyond the router) are"
+            + (
+                f" within RTT_EXCESS_MS={excess_limit:g}"
+                + (f" and RTT_WARN_MS={threshold:g}" if threshold is not None else "")
+                if excess_limit is not None
+                else f" within RTT_WARN_MS={threshold:g}"
+            ),
             "numbers": numbers,
         }
 

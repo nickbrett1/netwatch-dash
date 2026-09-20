@@ -133,7 +133,13 @@ const INFO = {
     body: "ICMP round-trip time to 1.1.1.1, a public address beyond the router. " +
       "It is the only series that measures the whole path — this Mac, the LAN, " +
       "the router, the ISP and the internet — which is why it is the one that " +
-      "moves the status. It is compared against the host's RTT_WARN_MS (4 ms)." },
+      "moves the status. What counts as a fault is the part of this number the " +
+      "router cannot explain: this RTT minus the gateway RTT. On a healthy link " +
+      `that difference is near zero however busy the router's own ICMP is, so the ` +
+      "fault is the difference reaching {rtt_excess_ms}. A fallback also fires " +
+      "when the whole path, router included, is above {rtt_warn_ms} — that catches " +
+      "a path slow everywhere rather than slow beyond the router. An unset " +
+      "threshold means no comparison at all, never a comparison against zero." },
   gateway: { title: "Gateway RTT",
     body: "ICMP round-trip time to 192.168.1.1, the router itself. Diagnostic " +
       "only: a spike here while the forwarded path stays flat is the router's own " +
@@ -170,11 +176,19 @@ function text(svg, x, y, s, attrs) {
 }
 function mmdd(ts) { return ts ? ts.slice(5, 10) : "?"; }
 
+// Thresholds as rendered, so the definitions can quote the host's real numbers
+// instead of a number written into this file that nobody will remember to change.
+let THRESHOLDS = {};
+
 function showInfo(id) {
   const info = INFO[id];
   if (!info) return;
   document.getElementById("modal-title").textContent = info.title;
-  document.getElementById("modal-body").textContent = info.body;
+  // Substituted by hand rather than by regex: this file is a Python string, and
+  // a regex here means escaping braces twice over.
+  let body = info.body;
+  for (const k in THRESHOLDS) body = body.split("{" + k + "}").join(THRESHOLDS[k]);
+  document.getElementById("modal-body").textContent = body;
   document.getElementById("modal").classList.add("open");
 }
 function fmt(v, digits) {
@@ -193,15 +207,27 @@ function fact(k, v, hint, cls, metric) {
 function facts(summary, localise) {
   const si = summary.status_inputs || {};
   const warn = si.forwarded_warn_ms;
-  const over = warn != null && si.forwarded_rtt_ms != null && si.forwarded_rtt_ms >= warn;
+  const excessLimit = si.forwarded_excess_ms;
+  // The fault comes from the server (`reading.fault`), not from re-deciding the
+  // rule here: two implementations of "is the path at fault" is how a tile and
+  // the sentence under it end up disagreeing.
+  const fault = ((localise || {}).reading || {}).fault;
+  const over = fault === "beyond-router" || fault === "path-ceiling";
   const dww = si.dl_warn_mbps, uww = si.ul_warn_mbps;
   const host = localise.host || {};
   const errs = host.errors || {};
 
+  const pathHint = fault === "beyond-router"
+    ? `beyond the router by ≥ ${fmt(excessLimit, 1)} ms`
+    : fault === "path-ceiling"
+    ? `above ${fmt(warn, 1)} ms even for the router`
+    : excessLimit == null
+    ? (warn == null ? "no threshold set" : `warn ≥ ${fmt(warn, 1)} ms`)
+    : `within ${fmt(excessLimit, 1)} ms of the router`;
+
   const tiles = [
     fact("Forwarded path RTT", fmt(si.forwarded_rtt_ms, 1) + " ms",
-         warn == null ? "no warn threshold set" : `warn ≥ ${fmt(warn, 1)} ms`,
-         over ? "over" : "", "forwarded"),
+         pathHint, over ? "over" : "", "forwarded"),
     fact("Gateway RTT", fmt(si.gw_rtt_ms, 1) + " ms", "the router itself", "", "gateway"),
     fact("Path loss", fmt(si.loss_pct, 2) + " %",
          si.probe_age_s == null ? "" : `probe ${Math.round(si.probe_age_s)}s old`, "", "loss"),
@@ -270,7 +296,7 @@ function rttChart(localise) {
     svg.appendChild(ns("line", { x1: 44, y1: py(warn), x2: 980, y2: py(warn),
       stroke: "#f0c14b", "stroke-width": 1, "stroke-dasharray": "4 4",
       opacity: 0.7 }));
-    text(svg, 984, py(warn) + 4, `warn ${fmt(warn, 0)}`, { "text-anchor": "end",
+    text(svg, 984, py(warn) + 4, `ceiling ${fmt(warn, 0)}`, { "text-anchor": "end",
       fill: "#f0c14b" });
   }
   const legend = document.getElementById("legend");
@@ -287,9 +313,14 @@ function rttChart(localise) {
     legend.appendChild(sw);
   }
   const w = localise.window || {};
+  const excess = (localise.thresholds || {}).rtt_excess_ms;
   const span = `${new Date(x0 * 60000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` +
                ` – ${new Date(x1 * 60000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
   note.textContent = `${span} · ${ys.length} samples` +
+    (excess == null
+      ? ""
+      : ` · fault is the path sitting ≥ ${fmt(excess, 0)} ms above its own gateway line`
+        + (warn ? `, or the whole path above ${fmt(warn, 0)} ms` : "")) +
     (clipped ? ` · ${clipped} sample(s) above ${ymax.toFixed(0)} ms drawn at the top edge` : "") +
     (w.truncated ? " · window is a bounded tail, older minutes are not loaded" : "");
 }
@@ -408,6 +439,13 @@ async function load() {
   const status = document.getElementById("status");
   status.textContent = summary.status;
   status.className = "pill " + summary.status;
+  const si0 = summary.status_inputs || {};
+  const th = localise.thresholds || {};
+  THRESHOLDS = {
+    rtt_excess_ms: th.rtt_excess_ms == null ? "not set" : fmt(th.rtt_excess_ms, 0) + " ms",
+    rtt_warn_ms: th.rtt_warn_ms == null ? "not set" : fmt(th.rtt_warn_ms, 0) + " ms",
+    dl_warn_mbps: si0.dl_warn_mbps == null ? "not set" : fmt(si0.dl_warn_mbps, 0) + " Mbps",
+  };
   document.getElementById("facts").innerHTML = facts(summary, localise);
 
   rttChart(localise);

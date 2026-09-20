@@ -2,7 +2,11 @@
 
 from pathlib import Path
 
+import pytest
+
 from netwatch_dash.parse import (
+    BEYOND_ROUTER,
+    PATH_CEILING,
     Drift,
     derive_status,
     iface_error_deltas,
@@ -13,6 +17,8 @@ from netwatch_dash.parse import (
     parse_iferrs,
     parse_last_alert,
     parse_streak,
+    path_excess_ms,
+    path_fault,
     speed_is_stale,
 )
 
@@ -105,6 +111,94 @@ def test_state_files():
     alerts = parse_last_alert((FIX / "last_alert.txt").read_text())
     assert set(alerts) == {"loss", "rtt", "dl", "ul"}
     assert alerts["rtt"] > 0
+
+
+def test_the_residual_cancels_the_router_out():
+    """The point of the residual: the router's own ICMP cannot inflate it.
+
+    Measured on mac-studio 2026-09-20, the same path read 5.8 ms beside a 2.5 ms
+    gateway and 11.3 ms beside a 33 ms one — the router moved 30 ms and the WAN
+    leg did not move at all. An absolute threshold sees that as signal; the
+    residual sees it as nothing.
+    """
+    assert path_excess_ms(5.8, 2.5) == pytest.approx(3.3)
+    assert path_excess_ms(11.3, 33.0) == pytest.approx(-21.7)  # the router is slow
+    # Both ends or no answer: a residual is a subtraction.
+    assert path_excess_ms(5.8, None) is None
+    assert path_excess_ms(None, 2.5) is None
+
+
+def test_path_fault_names_the_two_faults():
+    """Two conditions, because they implicate different hops."""
+    # Beyond the router: the WAN leg carries the delay.
+    assert (
+        path_fault(forwarded_rtt_ms=30.0, gateway_rtt_ms=3.0, ceiling_ms=25.0,
+                   excess_ms=10.0)
+        == BEYOND_ROUTER
+    )
+    # The whole path is slow including the router, but not *beyond* it — the
+    # ceiling catches what the residual deliberately forgives.
+    assert (
+        path_fault(forwarded_rtt_ms=38.0, gateway_rtt_ms=50.0, ceiling_ms=25.0,
+                   excess_ms=10.0)
+        == PATH_CEILING
+    )
+    # A quiet path at the host's real numbers is not a fault at all.
+    assert (
+        path_fault(forwarded_rtt_ms=6.6, gateway_rtt_ms=3.9, ceiling_ms=25.0,
+                   excess_ms=10.0)
+        is None
+    )
+
+
+def test_a_missing_threshold_is_no_comparison_never_a_comparison_with_zero():
+    """§6: an absent threshold is reported as absent, not read as 0 ms."""
+    assert path_fault(forwarded_rtt_ms=6.0, gateway_rtt_ms=3.0,
+                      ceiling_ms=None, excess_ms=None) is None
+    # Each threshold works on its own: the ceiling needs no gateway.
+    assert path_fault(forwarded_rtt_ms=30.0, gateway_rtt_ms=None,
+                      ceiling_ms=25.0, excess_ms=None) == PATH_CEILING
+    # And with no gateway there is no residual, so the excess cannot fire —
+    # which must not be mistaken for the residual being small.
+    assert path_fault(forwarded_rtt_ms=30.0, gateway_rtt_ms=None,
+                      ceiling_ms=None, excess_ms=10.0) is None
+    assert path_fault(forwarded_rtt_ms=None, gateway_rtt_ms=3.0,
+                      ceiling_ms=25.0, excess_ms=10.0) is None
+
+
+def test_a_router_spike_makes_the_status_quieter_not_louder():
+    """§7's invariant, now with a mechanism rather than by ignoring the input."""
+    base = {
+        "loss_pct": 0.0,
+        "link_ok": True,
+        "forwarded_rtt_ms": 20.0,
+        "forwarded_warn_ms": 25.0,
+        "forwarded_excess_ms": 10.0,
+        "forwarded_gw_rtt_ms": 3.0,
+        "probe_age_s": 10.0,
+        "probe_stale_s": 600.0,
+    }
+    assert derive_status(**base) == "warn"  # 17 ms beyond the router
+    # The router's reply inflating to 20 ms removes the excess entirely: same
+    # forwarded path, quieter status. A signal that can only ever be raised by a
+    # gateway spike is the bug this replaces.
+    assert derive_status(**{**base, "forwarded_gw_rtt_ms": 20.0}) == "ok"
+
+
+def test_the_display_gateway_reading_is_still_never_an_input():
+    """The old invariant, kept literally: `gw_rtt_ms` moves nothing at all."""
+    base = {
+        "loss_pct": 0.0,
+        "link_ok": True,
+        "forwarded_rtt_ms": 6.0,
+        "forwarded_warn_ms": 25.0,
+        "forwarded_excess_ms": 10.0,
+        "forwarded_gw_rtt_ms": 3.0,
+        "probe_age_s": 10.0,
+        "probe_stale_s": 600.0,
+    }
+    assert derive_status(**base) == "ok"
+    assert derive_status(**base, gw_rtt_ms=500.0) == "ok"
 
 
 def test_status_uses_loss_and_link_not_gateway_rtt():
