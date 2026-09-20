@@ -29,7 +29,28 @@ see `deploy/` and `schema/netwatch-data.md`.
 - `~/netwatch/gateway_rtt.csv` and `~/.local/state/netwatch/*` — runtime state,
   not source. Sampled into `tests/fixtures/`.
 
-## Interpreter policy (open, see schema doc)
+## Drift log — why these copies are already stale
+
+The copies were taken 2026-09-20 and were byte-identical to the host at that
+moment (`shasum` verified). Within the same day the host had moved on twice
+more. This is the case for co-location, recorded as it happens:
+
+| When (host mtime) | What changed | Consumer impact |
+| --- | --- | --- |
+| 2026-09-20 02:16 | `netwatch` gained `link`, `rx_mbps`, `saturated`, `peer`, `peer_ms`, `peer_loss_pct`, and `saturated` now suppresses latency alarms | Consumer parsing the v2 field set would silently ignore six fields and could alarm on a link the producer considers busy |
+| 2026-09-20 09:13 | `netwatch` gained `RTT_ALERT` (default `off`) and stopped raising `rtt`/`rtt-local` alarms; reporter flag changed `DEGRADED` -> `LOSS` | Contract §5 was missing a config key; §7's decision is now enforced in the producer too |
+| (this repo) | `gwping.py` gained `# iferrs` per §8 | Consumer must know the marker or it counts as drift forever |
+
+`producers/netwatch` was refreshed from the host after the second change; its
+sha256 is now `d728858a…`. `producers/gwping.py` deliberately differs from the
+host: it carries the `# iferrs` addition from schema §8, which is not deployed
+yet.
+
+**Rule that follows from this:** a copy here is evidence of what the producer
+*wrote at capture time*, never a claim about what is running *now*. Any
+comparison against the host that is more than a day old is assumed wrong until
+re-verified by `shasum`.
+
 
 `gwping.py`'s shebang is `#!/usr/bin/env python3` (Homebrew 3.14.7 if run by
 hand) but its launchd job invokes `/usr/bin/python3` (the Xcode CLT shim). One

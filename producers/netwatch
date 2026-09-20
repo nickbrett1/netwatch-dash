@@ -6,9 +6,10 @@
 # the SAME window, then:
 #   * suppresses the alarm entirely when the link is busy (our own traffic ->
 #     the latency is our queueing, not a fault);
-#   * requires the RTT to stay high for RTT_WARN_CONSEC consecutive probes;
-#   * if the wired peer is slow too, blames the local segment/host; if the
-#     peer stays flat, blames the path at/above the router;
+#   * alerts on packet loss on an otherwise idle link (the reliable signal);
+#   * measures + logs gateway RTT but does NOT alert on it by default
+#     (RTT_ALERT=off): the Orbi answers ICMP to its own address on a slow
+#     control-plane path, so its RTT is all jitter and no signal;
 #   * describes the link from its actual media (wired/wireless), no canned claim.
 #
 #   netwatch probe      cheap gateway-RTT + link check  (run every ~5 min)
@@ -29,7 +30,9 @@ mkdir -p "$STATE"
 
 # ---- defaults (override in config) --------------------------------------
 GATEWAY="auto"            # or an explicit IP; "auto" reads the default route
-RTT_WARN_MS=4.0           # avg gateway RTT above this = degraded path
+RTT_ALERT="off"           # gateway-RTT alarms ("rtt"/"rtt-local"). "off" = log only
+                          # (see ~/.config/netwatch/config for why this defaults off)
+RTT_WARN_MS=4.0           # avg gateway RTT above this = degraded path (only if RTT_ALERT=on)
 RTT_WARN_CONSEC=3         # ...for this many consecutive probes (persistence, not a blip)
 PING_COUNT=5              # pings per probe window
 NET_PEER="192.168.1.2"    # wired peer on the same switch; if it is slow too the
@@ -185,8 +188,11 @@ cmd_probe() {
       "${loss}% loss to ${gw} on ${dev} [${media}]${peer:+; peer ${peer} ${peer_loss}%}"
   fi
 
-  # 3) sustained high gateway RTT: require persistence, discriminate via peer.
-  if awk -v a="$avg" -v t="$RTT_WARN_MS" 'BEGIN{exit !(a>t)}'; then
+  # 3) sustained high gateway RTT — only when RTT_ALERT=on. Off by default:
+  #    the Orbi answers ICMP to its own address on a slow control-plane path
+  #    (floor ~1.75 ms, spikes to ~76 ms, 0% loss, forwarded traffic healthy),
+  #    so RTT is logged to events.jsonl but is not treated as a health signal.
+  if [ "${RTT_ALERT:-off}" != off ] && awk -v a="$avg" -v t="$RTT_WARN_MS" 'BEGIN{exit !(a>t)}'; then
     consec=0
     [ -f "$STATE/.rtt_streak" ] && consec=$(cat "$STATE/.rtt_streak")
     consec=$((consec + 1)); echo "$consec" >"$STATE/.rtt_streak"
@@ -242,7 +248,7 @@ for r in rows:
     t=r["ts"][11:19]
     if r["kind"]=="probe":
         sat=r.get("saturated",False)
-        flag="  <-- DEGRADED" if (r.get("rtt_ms",0)>4 and not sat) else ""
+        flag="  <-- LOSS" if ((r.get("loss_pct") or 0)>0 and not sat) else ""
         extra=""
         if r.get("peer_ms") is not None: extra+=f"  peer {r['peer_ms']}ms"
         if r.get("rx_mbps") is not None: extra+=f"  rx {r['rx_mbps']}Mbps" + (" [SATURATED]" if sat else "")

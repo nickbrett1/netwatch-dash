@@ -87,6 +87,18 @@ def test_config_whitelist_never_exposes_ntfy():
     assert parsed["RTT_WARN_MS"] == "4.0"
 
 
+def test_config_reads_rtt_alert_but_never_the_topic():
+    """`RTT_ALERT` is read so /healthz can say RTT alerting is off (§5, §7)."""
+    keys = set(_lines("config_keys.txt"))
+    assert "RTT_ALERT" in keys  # arrived 2026-09-20; the fixture tracks the host
+    parsed = parse_config(
+        'RTT_ALERT=off\nNTFY_TOPIC="nick-netwatch-verysecret"\n'
+        "SAT_MBPS=100\nNOTIFY_MACOS=true\n"
+    )
+    assert parsed == {"RTT_ALERT": "off"}
+    assert "verysecret" not in repr(parsed)  # the token value cannot leak
+
+
 def test_state_files():
     assert parse_streak((FIX / "rtt_streak.txt").read_text()) == 2
     alerts = parse_last_alert((FIX / "last_alert.txt").read_text())

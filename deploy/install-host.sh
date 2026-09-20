@@ -50,7 +50,7 @@ done
 echo "note: producers must already exist at ~/netwatch/ and ~/.local/bin/ (see producers/README.md)"
 
 echo "-- new dashboard job (not started unless --start) --"
-mkdir -p "$DEPLOY_DIR" "$HOME/.config/netwatch-dash"
+if [ "$DRY" = 0 ]; then mkdir -p "$DEPLOY_DIR" "$HOME/.config/netwatch-dash"; fi
 if [ ! -f "$HOME/.config/netwatch-dash/env" ] && [ "$DRY" = 0 ]; then
   cat > "$HOME/.config/netwatch-dash/env" <<EON
 NETWATCH_DASH_BIND=100.77.144.14:8791

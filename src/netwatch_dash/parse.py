@@ -53,6 +53,10 @@ CONFIG_WHITELIST = frozenset(
         "UL_WARN_MBPS",
         "ALERT_COOLDOWN",
         "NET_PEER",
+        # The producer's own switch for gateway-RTT alarms. Read so /healthz can
+        # report that RTT alerting is off and why RTT is shown but never moves
+        # status (schema §7): it is the config-level form of that decision.
+        "RTT_ALERT",
     }
 )
 

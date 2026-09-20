@@ -109,17 +109,24 @@ schema have separated, and the number is surfaced in `/healthz`.
 
 ## 5. Config (`~/.config/netwatch/config`) — whitelist only
 
-Keys present at capture:
+Keys present at capture (2026-09-20, 11 keys):
 
 ```
-ALERT_COOLDOWN  DL_WARN_MBPS  NET_PEER  NOTIFY_MACOS  NTFY_TOPIC
+ALERT_COOLDOWN  DL_WARN_MBPS  NET_PEER  NOTIFY_MACOS  NTFY_TOPIC  RTT_ALERT
 RTT_WARN_CONSEC  RTT_WARN_MS  SAT_LOAD  SAT_MBPS  UL_WARN_MBPS
 ```
 
 The dashboard reads **only** `RTT_WARN_MS`, `RTT_WARN_CONSEC`, `DL_WARN_MBPS`,
-`UL_WARN_MBPS`, `ALERT_COOLDOWN` (and optionally `NET_PEER`). **`NTFY_TOPIC` is
-never read and must never appear in any response.** A test asserts the summary
-and link payloads contain no `NTFY`.
+`UL_WARN_MBPS`, `ALERT_COOLDOWN`, `NET_PEER` and `RTT_ALERT`. **`NTFY_TOPIC` is
+never read and must never appear in any response.** A test asserts the whitelist
+cannot surface it.
+
+`RTT_ALERT` arrived on 2026-09-20 with the decision to stop treating gateway
+ICMP as a health signal (§7); the producer defaults it to `off`, so it logs RTT
+to `events.jsonl` but raises no `rtt`/`rtt-local` alarm. Reading it lets
+`/healthz` state that plainly. `SAT_MBPS`/`SAT_LOAD` are **not** read yet — they
+explain the producer's `saturated` suppression and become worth reading when the
+link panel exists, not before.
 
 ## 6. Compatibility rule (the point of one repo)
 
