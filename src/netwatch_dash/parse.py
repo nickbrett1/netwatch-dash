@@ -81,6 +81,22 @@ class Drift:
             + self.bad_lines
         )
 
+    def as_dict(self) -> dict:
+        """The drift, for a response body.
+
+        `count` is every occurrence and the names are de-duplicated: the count
+        answers "has the producer changed?" and the names answer "how?", and one
+        field repeated down a log must not look like a growing problem.
+        """
+        return {
+            "count": self.count,
+            "unknown_fields": sorted(set(self.unknown_fields)),
+            "unknown_markers": sorted(set(self.unknown_markers)),
+            "unknown_targets": sorted(set(self.unknown_targets)),
+            "unknown_kinds": sorted(set(self.unknown_kinds)),
+            "bad_lines": self.bad_lines,
+        }
+
 
 def parse_event(line: str, drift: Drift | None = None) -> dict | None:
     """Parse one `events.jsonl` line. Returns the record or None."""
@@ -236,6 +252,12 @@ def derive_status(
     en0_errors: int | None = None,
     rtt_streak: int | None = None,
     gw_rtt_ms: float | None = None,
+    dl_mbps: float | None = None,
+    ul_mbps: float | None = None,
+    dl_warn_mbps: float | None = None,
+    ul_warn_mbps: float | None = None,
+    speed_age_s: float | None = None,
+    speed_stale_s: float | None = None,
 ) -> str:
     """Status from the health signals only.
 
@@ -257,4 +279,24 @@ def derive_status(
         return "warn"
     if rtt_streak:
         return "warn"
+    # Throughput is a health signal (schema §7) — the recommended replacement for
+    # gateway RTT as a capacity check. Only a *current* measurement counts: a
+    # days-old speed test is not evidence about the link now, so a stale one is
+    # ignored rather than reported as either good or bad.
+    if speed_is_stale(speed_age_s, speed_stale_s) is False:
+        if dl_warn_mbps is not None and dl_mbps is not None and dl_mbps < dl_warn_mbps:
+            return "warn"
+        if ul_warn_mbps is not None and ul_mbps is not None and ul_mbps < ul_warn_mbps:
+            return "warn"
     return "ok"
+
+
+def speed_is_stale(age_s: float | None, stale_s: float | None) -> bool | None:
+    """Whether a speed measurement is too old to speak for the link now.
+
+    None when either side is unknown — the caller then leaves throughput out of
+    the status instead of guessing which way the missing side would have gone.
+    """
+    if age_s is None or stale_s is None:
+        return None
+    return age_s > stale_s

@@ -13,6 +13,7 @@ from netwatch_dash.parse import (
     parse_iferrs,
     parse_last_alert,
     parse_streak,
+    speed_is_stale,
 )
 
 FIX = Path(__file__).parent / "fixtures"
@@ -233,3 +234,34 @@ def test_every_marker_the_producer_writes_is_recognised():
     drift = Drift()
     parse_csv_line("# dhcp_renew 2026-09-20T11:44:34", drift)
     assert drift.unknown_markers == ["dhcp_renew"]
+
+
+def test_speed_staleness_is_three_valued():
+    """A missing age or threshold is unknown, not "not stale"."""
+    assert speed_is_stale(10.0, 100.0) is False
+    assert speed_is_stale(200.0, 100.0) is True
+    assert speed_is_stale(200.0, 100.0) is True
+    assert speed_is_stale(None, 100.0) is None
+    assert speed_is_stale(10.0, None) is None
+
+
+def test_throughput_only_counts_a_current_measurement():
+    """Throughput is a health signal (§7), but a stale reading is not a fact."""
+    base = {
+        "loss_pct": 0.0,
+        "link_ok": True,
+        "forwarded_rtt_ms": None,
+        "forwarded_warn_ms": 15.0,
+        "probe_age_s": 10.0,
+        "probe_stale_s": 600.0,
+        "dl_mbps": 10.0,
+        "ul_mbps": 500.0,
+        "dl_warn_mbps": 100.0,
+        "ul_warn_mbps": 50.0,
+        "speed_stale_s": 1000.0,
+        "speed_age_s": 10.0,
+    }
+    assert derive_status(**base) == "warn"  # download is below its threshold
+    assert derive_status(**{**base, "speed_age_s": 99999.0}) == "ok"  # too old to say
+    assert derive_status(**{**base, "dl_warn_mbps": None}) == "ok"  # no threshold stated
+    assert derive_status(**{**base, "dl_mbps": None}) == "ok"  # no measurement either

@@ -37,6 +37,22 @@ def _env_path(env: Mapping[str, str], key: str, default: Path) -> Path:
     return Path(value).expanduser() if value else default
 
 
+def _float_env(env: Mapping[str, str], key: str, default: float) -> float:
+    """A float setting, with an unparseable value falling back to the default.
+
+    These are freshness windows, not credentials: a typo in a window should not
+    stop the dashboard from starting, and it must not be silently read as 0
+    either — 0 would make every measurement stale and paint the tile red.
+    """
+    value = env.get(key)
+    if not value:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
 @dataclass(frozen=True)
 class Settings:
     """The dashboard's environment, resolved once at start-up."""
@@ -49,6 +65,23 @@ class Settings:
     home: Path
     # An explicit build-info.json, or None to discover it (see buildinfo.find).
     build_info_path: Path | None = None
+    # How old a measurement may be before it stops speaking for *now*. Defaults
+    # are multiples of the producers' own cadences: a probe runs every 300 s, so
+    # one missed run is jitter and three is 15 minutes of nothing.
+    probe_stale_s: float = 900.0
+    speed_stale_s: float = 172800.0  # two missed daily runs
+
+    @property
+    def events_path(self) -> Path:
+        return self.state_dir / "events.jsonl"
+
+    @property
+    def streak_path(self) -> Path:
+        return self.state_dir / ".rtt_streak"
+
+    @property
+    def last_alert_path(self) -> Path:
+        return self.state_dir / ".last_alert"
 
     @property
     def host_port(self) -> tuple[str, int]:
@@ -87,4 +120,6 @@ class Settings:
             tz=env.get("NETWATCH_DASH_TZ") or DEFAULT_TZ,
             home=home,
             build_info_path=Path(build_info).expanduser() if build_info else None,
+            probe_stale_s=_float_env(env, "NETWATCH_DASH_PROBE_STALE_S", 900.0),
+            speed_stale_s=_float_env(env, "NETWATCH_DASH_SPEED_STALE_S", 172800.0),
         )

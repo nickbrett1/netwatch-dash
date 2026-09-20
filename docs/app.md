@@ -19,6 +19,8 @@ python -m netwatch_dash      serve (no flags) · --version · --help
 | `src/netwatch_dash/settings.py` | every path and address, from the environment, with host defaults |
 | `src/netwatch_dash/buildinfo.py` | reads `build-info.json` back out of the payload; compares shipped producers with installed ones |
 | `src/netwatch_dash/app.py` | the HTTP surface |
+| `src/netwatch_dash/snapshot.py` | one read of the live state, and the status that comes out of it |
+| `src/netwatch_dash/events.py` | the bounded tail-reader for `events.jsonl` |
 | `src/netwatch_dash/parse.py` | the tolerant parsers (the data contract, `schema/netwatch-data.md`) |
 
 `--version` and `--help` deliberately do not import the ASGI stack: the Buildkite
@@ -62,16 +64,17 @@ dashboard; a file it cannot read is a *reported absence*.
 
 ```json
 {
-  "status": "unknown",
-  "status_reason": ["not read yet — loss_pct, media/link and probe age: …"],
+  "status": "warn",
+  "status_reason": ["RTT_ALERT=off on the host: …", "not read yet - …"],
   "version": "0.1.15", "commit": "deadbeef…",
   "build": {"found": true, "path": "…", "tag": "v0.1.15", "target": "aarch64-apple-darwin",
             "built_at": "…", "python": {…}, "wheel": {…}, "dependencies": {…}},
   "producers": {"shipped": {…}, "installed": {…}, "skew": [], "missing": ["netwatch"]},
   "config": {"RTT_ALERT": "off", "RTT_WARN_MS": "4.0"},
   "config_error": null,
-  "data": {"drift_count": null, "reason": "no reader implemented yet"},
-  "not_implemented": ["/api/summary", "…"]
+  "data": {"drift_count": 0, "drift": {"unknown_fields": [], "bad_lines": 0, …}},
+  "sources": {"events": {…}, "config": {…}, "csv": {"read": false, "reason": "…"}},
+  "not_implemented": {"/api/localise": "needs the csv targets …"}
 }
 ```
 
@@ -89,36 +92,72 @@ Four things it says, and why each is shaped the way it is:
   `# iferrs` marker and the host's does not (producers/README.md).
 - **`config` is the whitelist, so `NTFY_TOPIC` cannot appear.** `parse_config`
   drops it by not listing it; a test asserts the token cannot reach a response
-  even when it is in the file (schema §5).
-- **`status` is `unknown`, and says why.** Every input to the status comes from a
-  reader that does not exist yet, and `derive_status` answers `unknown` for
-  inputs it does not have (schema §6, §7). Gateway RTT is never an input, by
-  design: it measures the router's control-plane CPU, not the path, so a `gw`
-  spike beside a flat `wire` is benign, not a fault.
+  even when it is in the file (schema §5). Verified against the host's own config
+  file, not only a fixture.
+- **`data.drift_count` is the parser's count over the real log.** Zero across the
+  full 2012-line `events.jsonl` as captured (2026-09-20), which is the invariant
+  schema §6 asks CI to hold: a non-zero count means producer and schema have
+  separated, and it is a number rather than a missing panel.
+- **`status`** is `unknown` only when there is nothing to derive it from (no
+  usable probe); otherwise it is the health signals. Every reason is printed, and
+  every `ok` is qualified by what was *not* looked at — an unqualified green light
+  is the failure this list exists to prevent.
 
-`data.drift_count` is `null` rather than `0` for the same reason: `0` would claim
-a clean parse that has not happened.
-
-## The endpoints that read data
-
-Not built yet; they arrive with the readers, and each names what it is for.
+## The data endpoints
 
 | Endpoint | Reads | Phase |
 | --- | --- | --- |
-| `/api/summary` | everything below, as one object for the tile | 2 |
-| `/api/probe` | recent `kind: "probe"` events — `loss_pct`, `media`/`link`, `peer_ms`, `saturated`, probe age | 2 |
-| `/api/link` | `media` history and `# link_change` markers — renegotiation / bad-cable | 2 |
-| `/api/speed` | `kind: "speed"` events — capacity, the recommended gw-ICMP replacement | 2 |
-| `/api/localise` | which segment is at fault: `csv` targets (`gw`/`wire`/`wl`/`net`) + `# iferrs` deltas | 3 |
-| `/api/incidents` | `# loss` / `# burst_*` markers, `.last_alert`, `.rtt_streak` | 3 |
+| `/api/summary` | everything below, as one object for the tile — status, its reasons, the inputs it used, the newest probe and speed test, the state files, drift and sources | **2 — built** |
+| `/api/probe` | the most recent `kind: "probe"` events (oldest first), `?limit=` 1–1000 | **2 — built** |
+| `/api/speed` | the most recent `kind: "speed"` events | **2 — built** |
+| `/api/link` | `media` history and the `# link_change` markers — renegotiation / bad-cable | 3 |
+| `/api/localise` | which segment is at fault: the csv targets (`gw`/`wire`/`wl`/`net`) and `# iferrs` deltas | 3 |
+| `/api/incidents` | the `# loss` / `# burst_*` markers, `.last_alert`, `.rtt_streak` | 3 |
 
-Two constraints are fixed before any of them is written:
+`/healthz` names the ones that do not exist yet, with the reason, so a missing
+endpoint is a documented absence rather than a 404 to interpret.
+
+`/api/probe` and `/api/speed` both return `returned`, `in_window` and
+`truncated`. That trio is not decoration: *"no data"* and *"no data in the window
+I read"* are different answers, and a page that cannot tell them apart will draw
+an empty chart over a full file.
+
+### Rules the readers are built to
 
 - **The CSV is never parsed per request** (schema §3) — ~8.4 MB/day, ~3 GB/yr. It
   is read by a tailer into a per-minute rollup, and the endpoints read the
   rollup. A byte offset is only valid while the file grows, so the reader
   invalidates it on inode change or `size < offset` (memo v3 §2, item 8 — an open
   gap, specified but not implemented).
-- **`unknown` is never coerced.** A missing field, an unrecognised marker and an
-  unknown `media` value are reported as unknown, and unrecognised fields/markers
-  are *counted* into the drift number this endpoint surfaces (schema §6).
+- **`events.jsonl` is read as a bounded tail** (`events.py`, 1 MiB default).
+  Cheap enough per request, but not unbounded, and the bounded read *also*
+  sidesteps the rotation gap: there is no persisted offset to invalidate, so a
+  rotated or truncated file is a shorter tail rather than a pointer into a
+  different file. `bytes_read`, `lines` and `truncated` are in every answer.
+- **Record order is not trusted.** The real file is append-ordered; the captured
+  fixture is not, and a reader that trusted position would answer with whatever
+  line happened to be last. Everything is ordered by the record's own `ts`, and a
+  record whose `ts` cannot be parsed is dropped *and counted* — it cannot be
+  placed in time, so it cannot be used.
+- **A torn tail is not drift.** The writer appends to a file a reader may open
+  mid-write, so a final line that does not parse is discarded silently. A final
+  line that *does* parse is a record and is subject to the contract like any
+  other — otherwise the last line of every file would be exempt.
+- **`unknown` is never coerced, in either direction.** A missing field is `null`,
+  an unrecognised field/marker is counted into the drift number (schema §6), and
+  an absent `media` is *unknown*, not a bad link — the mirror error to reading
+  unknown as good.
+
+### Two judgement calls, recorded
+
+- **`link_ok` is three-valued.** `media` saying `1000bas` is `true`; `media`
+  present and saying anything else (including `autoselect`) is `false` and moves
+  the status to `crit`, because that is the renegotiation canary (schema §7);
+  `media` absent is `null` — unknown, and it moves nothing.
+- **`.rtt_streak` is reported and never passed to the status.** The streak counts
+  consecutive over-threshold *gateway* probes, and gateway RTT is not a health
+  input (schema §7); the producer's own `RTT_ALERT=off` default says the same.
+  It is rendered with its provenance, like the gateway RTT beside it. Throughput
+  *is* a status input (§7's table) — but only a current measurement: a days-old
+  speed test is not evidence about the link now, so a stale one is ignored rather
+  than reported as either good or bad.

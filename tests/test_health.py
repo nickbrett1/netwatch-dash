@@ -74,17 +74,20 @@ def test_healthz_over_http_is_json_and_200(tmp_path):
     assert response.json()["version"] == "1.2.3"
 
 
-def test_status_is_unknown_not_ok_while_nothing_is_read(tmp_path):
+def test_status_is_unknown_not_ok_while_there_is_no_data(tmp_path):
     """`unknown` is the honest answer, and the reason says which inputs are missing.
 
-    Every status input comes from a reader that does not exist yet, so an "ok"
+    A payload that has never probed has no loss, no link and no age, so an "ok"
     here would be a claim about a network nothing has looked at (schema §6).
     """
     write_build_info(tmp_path)
     body = healthz_body(make_settings(tmp_path))
     assert body["status"] == "unknown"
+    assert any("events.jsonl" in reason for reason in body["status_reason"])
     assert any("not read yet" in reason for reason in body["status_reason"])
-    assert body["data"]["drift_count"] is None
+    # Zero because the read happened and found nothing; the read is what the
+    # count reports on, not the presence of a file.
+    assert body["data"]["drift_count"] == 0
 
 
 def test_a_payload_that_cannot_read_its_own_build_says_so(tmp_path):
@@ -159,11 +162,15 @@ def test_absent_config_is_reported_not_assumed(tmp_path):
     assert body["config_error"] == "not present"
 
 
-def test_not_implemented_endpoints_are_named(tmp_path):
+def test_not_implemented_endpoints_are_named_with_a_reason(tmp_path):
+    """A missing endpoint should be a documented absence, not a 404 to interpret."""
     write_build_info(tmp_path)
     body = healthz_body(make_settings(tmp_path))
-    assert "/api/summary" in body["not_implemented"]
     assert "/api/localise" in body["not_implemented"]
+    assert "Phase 3" in body["not_implemented"]["/api/localise"]
+    # and the ones that exist are not listed as missing
+    assert "/api/summary" not in body["not_implemented"]
+    assert "/api/probe" not in body["not_implemented"]
 
 
 def test_version_flag_answers_without_the_asgi_stack(tmp_path, monkeypatch, capsys):

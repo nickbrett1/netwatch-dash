@@ -300,12 +300,13 @@ genproj's generated step, not something this project chose.
   `~/netwatch/` and `~/.local/bin/`. That is the "co-release, co-adopt" half of
   D1, and it overwrites files on the alerting path, so it is a deliberate
   decision rather than a follow-up (memo v3 §6.1).
-- **`/healthz` reads `build-info.json` and stops there.** It reports the
-  payload's identity, the producer comparison and the whitelisted config
-  (`docs/app.md`); the status is deliberately `unknown` until the readers land,
-  and `data.drift_count` is `null` for the same reason. `bin/netwatch-dash
-  --version` / `--help` are answered before the ASGI stack is imported, which is
-  what the smoke gate probes; no endpoint reads `events.jsonl` or the CSV yet.
+- **`/healthz` reports the payload and the status; the CSV is still unread.** It
+  reads `build-info.json`, the producer comparison, the whitelisted config and the
+  bounded tail of `events.jsonl`, and returns a real drift count (0 across the
+  full 2012-line log as captured). `/api/summary`, `/api/probe` and `/api/speed`
+  are built; `/api/link`, `/api/localise` and `/api/incidents` need the CSV
+  rollup. `bin/netwatch-dash --version` / `--help` are answered before the ASGI
+  stack is imported, which is what the smoke gate probes.
 - **The smoke gate runs the payload but does not serve it.** The generated step
   runs `build-payload.sh` → `smoke-launch.sh`, and the gate exercises
   `--version`. Starting the app and curling `/healthz` on the assembled payload —
