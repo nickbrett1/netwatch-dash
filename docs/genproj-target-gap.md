@@ -261,10 +261,11 @@ matrix - the pipeline still runs one build step uploading `dist/**`.
    a release depending on both — i.e. §9's fix, emitted rather than hand-patched.
    §9's `TEMPORARY` plugin block is gone with it. Re-verify on any future regen;
    the check is still the point of regenerating.
-5. **A regen reverts `.gitignore`**, and genproj's copy does not ignore `dist/`
-   or `release/`. `release/` holds a ~20 MB tarball with a CPython inside it, so
-   an un-ignored `release/` is one `git add -A` away from committing a binary to
-   history. Re-add both entries after a regen (this one is worth upstreaming).
+5. **A regen reverts `.gitignore`**, and genproj's copy does not ignore `dist/`,
+   `release/` or `payload/`. `release/` holds a ~20 MB tarball with a CPython
+   inside it, so an un-ignored `release/` is one `git add -A` away from committing
+   a binary to history. Re-add all three entries after a regen (this one is worth
+   upstreaming).
 6. **A regen overwrites `RELEASING.md`**, which carries a blockquote pointing
    readers at this project's payload shape. It is infra, so the pointer goes with
    it; re-add it after a regen. Everything durable lives in `docs/`, which
@@ -361,6 +362,36 @@ exactly, so taking #38 costs us the duplicate assembly call inside
 `release-artifacts.sh` (the generated step will have done it already) and nothing
 else. It will also start writing `payload/` into the checkout, so `payload/`
 joins `dist/` and `release/` in `.gitignore` (trap 5).
+
+**Adopted.** PR #38 needed a rebase onto `3b31389` first — it was branched before
+#37 merged and both edited `capability-template-utils.js` in adjacent regions, so
+the two had to land as one coherent `renderBuildStep` / `renderSmokeStep`. The
+conflict was one block: #37's rewritten `isDarwinTarget` doc against this PR's
+insertion of `RELEASE_PAYLOAD_ROOT`, resolved by keeping both. All 712 tests pass
+after the rebase, `npm run build:templates` produces a byte-identical
+`templates.generated.js` (so the new template was wired correctly by hand), and
+it merged as `d3c49af`, deployed by genproj build 135.
+
+The regen at `298c5d1` then emitted, for this project:
+
+```yaml
+# smoke step
+bash scripts/build-payload.sh "${SMOKE_VERSION:-0.0.0-smoke}" payload dist
+bash scripts/smoke-launch.sh "payload"
+# release step
+bash scripts/build-payload.sh "$VERSION" payload dist
+bash scripts/release-artifacts.sh "$VERSION"
+```
+
+One assembler, two callers, one root — which is exactly the property §8 said was
+missing. Our `scripts/build-payload.sh` was not overwritten (app-owned) and did
+not need to change, because it was already `<version> <root> [<wheel-dir>]`.
+What did change is `release-artifacts.sh`: it now reuses an assembled
+`payload/bin/netwatch-dash` when one is present and only assembles for itself
+when it is not, so CI assembles once instead of twice while the script stays
+runnable by hand. The double assembly would have been harmless — the same bytes,
+twice — but "harmless waste on a release path" is how a release path becomes slow
+enough that someone starts skipping it.
 
 ## 9. Third gap: the darwin rule is applied to a step that does not build a Mach-O
 

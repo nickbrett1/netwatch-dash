@@ -10,13 +10,18 @@
 # release step uploads every file it finds there and nothing else. Producing no
 # files is valid: the release then carries notes and no assets.
 #
-# Called as: bash scripts/release-artifacts.sh <version>
+# Called as: bash scripts/release-artifacts.sh <version> [<payload-root>]
 # The version is the tag without its `v` prefix, e.g. "1.2.4" for tag v1.2.4.
+# The optional root is the already-assembled payload; omitted, this uses ./payload
+# if the pipeline assembled one there, and otherwise assembles its own.
 #
-# This script PACKS and PUBLISHES; it does not assemble. The payload root is
-# built by scripts/build-payload.sh, which the smoke gate also calls, so the tree
-# this packs and the tree CI ran are one tree. That split is deliberate; see the
-# header of build-payload.sh for why the assembly cannot live in the build step.
+# This script PACKS and PUBLISHES. The payload root is built by
+# scripts/build-payload.sh, which the smoke gate also calls, so the tree this
+# packs and the tree CI ran are one tree. That split is deliberate; see the header
+# of build-payload.sh for why the assembly cannot live in the build step. When no
+# assembled root is handed to it this falls back to calling that same assembler
+# itself, so the script stays runnable on its own without becoming a second
+# assembler.
 set -euo pipefail
 
 VERSION="${1:?usage: release-artifacts.sh <version>}"
@@ -71,13 +76,40 @@ trap 'rm -rf "$WORK"' EXIT
 PAYLOAD="$WORK/payload"
 
 # --- assemble -----------------------------------------------------------------
-# The release step downloads what the build step uploaded into dist/ before
-# calling this, so the wheel the assembly installs is the exact one pytest ran
-# against. Everything the payload contains — the interpreter, the resolved
-# dependencies, the producers, build-info.json — is decided in one place, and the
-# gates that refuse a payload containing another platform's binaries live there
-# too.
-bash scripts/build-payload.sh "$VERSION" "$PAYLOAD" dist
+# Two callers can have assembled this root already, and only one of them is here.
+#
+# Since genproj gained the payload-assembly hook (docs/genproj-target-gap.md §8),
+# the generated release step calls `scripts/build-payload.sh "$VERSION" payload
+# dist` immediately before this script, and the smoke gate calls the same
+# assembler into the same `payload/` root. When that root is present and
+# assembled, packing it is the whole job — reassembling would download and unpack
+# a second CPython and `pip install` the wheel again, for a tree that is already
+# byte-for-byte the one the gate ran.
+#
+# So: use the assembled root if the pipeline handed us one, and otherwise
+# assemble into a private temp root. The fallback is not vestigial — it is what
+# keeps this script runnable on its own (by hand, or from an older pipeline that
+# predates the hook), and it is why the "should we assemble?" test is *is there a
+# runnable root here*, not *is this CI*.
+REQUESTED_ROOT="${2:-}"
+if [ -n "$REQUESTED_ROOT" ]; then
+  PAYLOAD="$REQUESTED_ROOT"
+elif [ -x "payload/bin/$PROJECT" ]; then
+  PAYLOAD="$PWD/payload"
+  log "using the payload root the pipeline assembled at '$PAYLOAD'"
+fi
+
+if [ -x "$PAYLOAD/bin/$PROJECT" ]; then
+  log "payload root already assembled at '$PAYLOAD' — packing it as-is"
+else
+  # The release step downloads what the build step uploaded into dist/ before
+  # calling this, so the wheel the assembly installs is the exact one pytest ran
+  # against. Everything the payload contains — the interpreter, the resolved
+  # dependencies, the producers, build-info.json — is decided in one place, and
+  # the gates that refuse a payload containing another platform's binaries live
+  # there too.
+  bash scripts/build-payload.sh "$VERSION" "$PAYLOAD" dist
+fi
 
 # --- pack --------------------------------------------------------------------
 # `tar -C "$PAYLOAD" .` puts the CONTENTS of the payload at the root of the

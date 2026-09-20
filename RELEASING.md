@@ -66,18 +66,17 @@ else releases notes only until the patterns are corrected.
 yours. It is seeded by genproj once and is never overwritten on regeneration (it
 lives under `scripts/`, which is app-owned). Edit it to change the artifact
 names, ship one file per platform, sign or notarise, or add a launcher manifest.
-It packages the assembled payload root by default, and produces no assets if
-there is nothing there.
+It packages `dist/` by default, and produces no assets if there is nothing
+there.
 
-**How the build output becomes a payload root** is `scripts/build-payload.sh`,
-also yours. A wheel or a bundle is an artifact, not something you can launch; the
-smoke gate and the release step both call this one script (`<version>
-<output-root> [<input-dir>]`) so that the tree the gate runs is the tree the
-tarball contains. The seeded default copies `dist/` into `payload/`, which keeps
-the old behaviour for a project whose `dist/` already was a payload root; a
-project that must assemble something — a bundled interpreter, a pinned platform
-— replaces the body. It is not emitted for a `targets` (rust) release, whose
-per-target build already links its payload into `build/<target>/`.
+> **This project does not do that.** `scripts/release-artifacts.sh` here packs a
+> launcher-shaped payload with a bundled arm64 CPython, published under the
+> declared triple `aarch64-apple-darwin`. The payload is assembled by
+> `scripts/build-payload.sh` and run before publication by
+> `scripts/smoke-launch.sh`. See `docs/release-payload.md` for what it builds and
+> `docs/genproj-target-gap.md` for why the label is a declaration and not a
+> filename. (This file is genproj-owned and regenerated — the pointer belongs to
+> `docs/`, trap 6 of that memo.)
 
 Asset **names** are a contract: anything fetching
 `releases/latest/download/<name>` depends on the exact string, so treat a name

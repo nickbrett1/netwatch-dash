@@ -113,9 +113,9 @@ Two consequences for **this** repo:
 
    | Script | Origin | Why we diverge |
    | --- | --- | --- |
-   | `scripts/release-artifacts.sh` | seeded, rewritten by hand | packs the launcher-shaped payload under the declared triple |
-   | `scripts/build-payload.sh` | ours entirely | the assembly genproj has no place for (`docs/genproj-target-gap.md` §8) |
-   | `scripts/smoke-launch.sh` | seeded by the §7 change, rewritten | assembles before running, because `dist/` is a wheel here, not a payload root |
+   | `scripts/release-artifacts.sh` | seeded, rewritten by hand | packs the launcher-shaped payload under the declared triple, and reuses the pipeline-assembled root rather than assembling a second one |
+   | `scripts/build-payload.sh` | ours entirely | the assembly the seeded copy cannot do (a bundled CPython). Unchanged by §8: ours was already `<version> <root> [<wheel-dir>]`, which is the contract genproj standardised on, so the hook found a script that already matched |
+   | `scripts/smoke-launch.sh` | seeded by the §7 change, rewritten | runs an already-assembled root as-is, and assembles from a wheel directory when handed one — so it works under both the pre-§8 pipeline (`smoke-launch.sh dist`) and the current one (`build-payload.sh … → smoke-launch.sh payload`) |
 
    A regen will therefore *seed* `smoke-launch.sh` for a project that has none,
    and leave ours exactly as it is.

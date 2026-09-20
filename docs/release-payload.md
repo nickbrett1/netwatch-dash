@@ -7,9 +7,9 @@ Three scripts, one payload:
 
 | Script | Job | Called by |
 | ------ | --- | --------- |
-| `scripts/build-payload.sh <version> <root> [<wheel-dir>]` | **assembles** the payload root | the two below |
-| `scripts/release-artifacts.sh <version>` | **packs** it into `release/` and writes the manifest | the release step, with the version it just tagged |
-| `scripts/smoke-launch.sh <wheel-dir>` | **runs** it before publication | the smoke step, on the macOS agent |
+| `scripts/build-payload.sh <version> <root> [<wheel-dir>]` | **assembles** the payload root | the generated smoke step, the generated release step, and `release-artifacts.sh` as a fallback |
+| `scripts/release-artifacts.sh <version> [<root>]` | **packs** it into `release/` and writes the manifest | the release step, with the version it just tagged |
+| `scripts/smoke-launch.sh <root-or-wheel-dir>` | **runs** it before publication | the smoke step, on the macOS agent |
 
 `release/` is uploaded whole by the release step (override: `OUT_DIR=…`).
 
@@ -37,28 +37,33 @@ share/netwatch-dash/build-info.json   what this payload is; /healthz reads it
 ## Why assembly is its own script
 
 The payload root has to exist before it can be either **packed** or **run**, and
-those two happen in different Buildkite steps on different hosts:
+those two happen in different Buildkite steps on different hosts. Since genproj
+gained the assembler hook (`docs/genproj-target-gap.md` §8) the generated steps
+call it directly, so both consumers assemble the *same* root at `payload/`:
 
 ```
-build step   (native macOS)   python -m build        →  dist/*.whl
-smoke step   (native macOS)   smoke-launch.sh dist   →  assemble → run → gate
-release step (linux/arm64)    release-artifacts.sh   →  assemble → pack → publish
+build step   (container)      python -m build              →  dist/*.whl
+smoke step   (native macOS)   build-payload.sh → smoke-launch.sh payload
+release step (container)      build-payload.sh → release-artifacts.sh → publish
 ```
 
-genproj's smoke gate assumes the payload root *is* what the build step uploaded,
-and calls `bash scripts/smoke-launch.sh dist`. That is true for a plain wheel.
-It is not true for this project, because the payload carries a CPython and has to
-be assembled — and the build step's commands are genproj-owned, so they cannot be
-extended to assemble it.
+The build step's own commands are genproj-owned and cannot be extended, which is
+why the assembly is not there — and its output is a wheel, not a payload root, so
+there is nothing there to assemble from anyway. It uploads `dist/**`, and both
+consumers download that and hand it to the one assembler.
 
-So the argument `smoke-launch.sh` receives is a *wheel directory*, and the
-payload is built from it by the same script `release-artifacts.sh` packs from.
-The gate therefore runs the real payload — same interpreter, same resolved
+Because the gate assembles through the same script and into the same root the
+release packs, it runs the real payload — same interpreter, same resolved
 dependencies, same entry-point shim the tarball will contain — rather than a
 thinner stand-in. Running the wheel in place would be a gate that passes whether
 or not the assembly works, which is decoration. (The one honest difference
 between what is smoked and what is released is two `build-info.json` fields; see
 "Where the smoked payload and the released one differ" below.)
+
+`release-artifacts.sh` still *can* assemble, and does when it is run on its own
+or the assembled root is absent — but in CI it finds `payload/bin/netwatch-dash`
+already there and packs it as-is. That keeps the script usable by hand without
+making it a second assembler.
 
 The cost is that the assembly runs twice per release (once on the Mac to smoke,
 once in the release container to pack). That is accepted: it buys a gate that
@@ -265,9 +270,9 @@ target — no container, because a macOS binary cannot be linked in a Linux one:
 
 | Step | Host | Runs |
 | ---- | ---- | ---- |
-| `build` | native macOS, queue `mac-studio-linux` | `python -m build` → uploads `dist/**` |
-| `smoke_aarch64_apple_darwin` | native macOS, same queue | downloads `dist/**`, `bash scripts/smoke-launch.sh dist` |
-| `release` | `python:3.13-slim` container, `linux/arm64` | downloads `dist/**`, `release-artifacts.sh`, `gh release create` |
+| `build` | container, queue `mac-studio-linux` | `python -m build` → uploads `dist/**` |
+| `smoke_aarch64_apple_darwin` | native macOS, same queue | downloads `dist/**`, `build-payload.sh … payload dist`, `bash scripts/smoke-launch.sh payload` |
+| `release` | `python:3.13-slim` container, `linux/arm64` | downloads `dist/**`, `build-payload.sh "$VERSION" payload dist`, `release-artifacts.sh`, `gh release create` |
 
 Both the build and smoke steps carry `RELEASE_TARGET`, and the release step
 `depends_on` the smoke gate.
