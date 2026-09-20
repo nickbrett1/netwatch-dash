@@ -65,28 +65,36 @@ LANDING_HTML = """<!doctype html>
   .over { color: #f0c14b; }
   .bad { color: #ff6b6b; }
   .good { color: #5ee08a; }
-  #reading .detail { margin-top: 4px; }
+  .fact.link { cursor: help; }
+  .fact.link:hover { border-color: #3b4152; background: #131722; }
+  .fact .k::after { content: " ⓘ"; color: #4b5563; font-size: 11px; }
+  .legend.col { display: grid; gap: 4px 18px;
+                grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  .legend.col .key { align-items: baseline; }
+  .legend.col b { font-family: ui-monospace, Menlo, monospace; }
+  #modal { position: fixed; inset: 0; background: #05070bd9; display: none;
+           align-items: center; justify-content: center; padding: 20px; z-index: 10; }
+  #modal.open { display: flex; }
+  #modal .card { background: #161923; border: 1px solid #33394a; border-radius: 10px;
+                 max-width: 560px; padding: 18px 20px; }
+  #modal h3 { margin: 0 0 8px; font-size: 14px; }
+  #modal p { margin: 0; color: #c3c8d2; }
+  #modal .close { margin-top: 14px; font-size: 12px; color: var(--dim); }
 </style>
 </head>
 <body>
+<div id="modal"><div class="card">
+  <h3 id="modal-title"></h3><p id="modal-body"></p>
+  <div class="close">click anywhere, or press Esc, to close</div>
+</div></div>
 <header>
   <h1>netwatch-dash</h1>
   <span id="status" class="pill unknown">…</span>
-  <span id="reading-verdict" class="muted small"></span>
-  <span id="version" class="muted small"></span>
 </header>
 <main>
   <section>
     <h2>Now</h2>
     <div class="facts" id="facts"><span class="muted small">loading…</span></div>
-  </section>
-  <section id="reading">
-    <h2>What the data says</h2>
-    <div id="reading-detail" class="muted small">…</div>
-  </section>
-  <section>
-    <h2>Why this status</h2>
-    <ul id="reasons"><li class="muted">loading…</li></ul>
   </section>
   <section>
     <h2>Round-trip time, per minute (ms)</h2>
@@ -109,6 +117,45 @@ LANDING_HTML = """<!doctype html>
 <script>
 const COLORS = { net: "#5ee08a", wire: "#63b3ed", gw: "#f0c14b", wl: "#c084fc" };
 const TARGETS = ["net", "wire", "gw", "wl"];
+// Which host each series is, and what watching it tells you. The letters alone
+// are not self-explanatory, and the legend is where that has to be fixed.
+const TARGET_META = {
+  net:  { host: "1.1.1.1",     what: "forwarded path — beyond the router" },
+  wire: { host: "192.168.1.2", what: "wired peer — far end of the LAN link" },
+  gw:   { host: "192.168.1.1", what: "the router itself" },
+  wl:   { host: "192.168.1.14", what: "wireless peer — over Wi-Fi" },
+};
+
+// Long-form definitions, on demand. They are here rather than on the page
+// because they are reference material: needed once, then noise.
+const INFO = {
+  forwarded: { title: "Forwarded path RTT",
+    body: "ICMP round-trip time to 1.1.1.1, a public address beyond the router. " +
+      "It is the only series that measures the whole path — this Mac, the LAN, " +
+      "the router, the ISP and the internet — which is why it is the one that " +
+      "moves the status. It is compared against the host's RTT_WARN_MS (4 ms)." },
+  gateway: { title: "Gateway RTT",
+    body: "ICMP round-trip time to 192.168.1.1, the router itself. Diagnostic " +
+      "only: a spike here while the forwarded path stays flat is the router's own " +
+      "ICMP handling, not a fault on the path, so it never moves the status " +
+      "(RTT_ALERT is off on this host)." },
+  loss: { title: "Path loss",
+    body: "The share of probes in the window that got no reply, read from the " +
+      "probe log rather than the ping stream, and reported per minute. A minute " +
+      "in which nothing replied counts as 100% loss for that minute. Loss is worth " +
+      "watching beside RTT because it is the signal that survives a link that is " +
+      "saturated rather than broken." },
+  en0: { title: "en0 errors",
+    body: "Cumulative error counters for en0, the LAN interface, from the " +
+      "producer's # iferrs markers (netstat -ib): input errors + output errors + " +
+      "collisions. These are raw since-boot totals, not deltas — the dashboard " +
+      "derives the change between markers. Zero is the expected reading." },
+  peer: { title: "Peer RTT",
+    body: "Round-trip time to 192.168.1.2, the host at the far end of the wired " +
+      "LAN link. Diagnostic: the data contract lists peer RTT and peer loss as " +
+      "health signals but deliberately leaves them out of the status, because a " +
+      "busy peer is not a path fault." },
+};
 
 function ns(tag, attrs) {
   const el = document.createElementNS("http://www.w3.org/2000/svg", tag);
@@ -122,14 +169,23 @@ function text(svg, x, y, s, attrs) {
   return t;
 }
 function mmdd(ts) { return ts ? ts.slice(5, 10) : "?"; }
+
+function showInfo(id) {
+  const info = INFO[id];
+  if (!info) return;
+  document.getElementById("modal-title").textContent = info.title;
+  document.getElementById("modal-body").textContent = info.body;
+  document.getElementById("modal").classList.add("open");
+}
 function fmt(v, digits) {
   return v == null ? "–" : Number(v).toFixed(digits == null ? 1 : digits);
 }
 
 // ---------------------------------------------------------------- the numbers
 
-function fact(k, v, hint, cls) {
-  return `<div class="fact"><div class="k">${k}</div>
+function fact(k, v, hint, cls, metric) {
+  const link = metric ? ` link" data-metric="${metric}` : "";
+  return `<div class="fact${link}"><div class="k">${k}</div>
     <div class="v ${cls || ""}">${v}</div>
     ${hint ? `<div class="h">${hint}</div>` : ""}</div>`;
 }
@@ -145,10 +201,10 @@ function facts(summary, localise) {
   const tiles = [
     fact("Forwarded path RTT", fmt(si.forwarded_rtt_ms, 1) + " ms",
          warn == null ? "no warn threshold set" : `warn ≥ ${fmt(warn, 1)} ms`,
-         over ? "over" : ""),
-    fact("Gateway RTT", fmt(si.gw_rtt_ms, 1) + " ms", "the router itself"),
+         over ? "over" : "", "forwarded"),
+    fact("Gateway RTT", fmt(si.gw_rtt_ms, 1) + " ms", "the router itself", "", "gateway"),
     fact("Path loss", fmt(si.loss_pct, 2) + " %",
-         si.probe_age_s == null ? "" : `probe ${Math.round(si.probe_age_s)}s old`),
+         si.probe_age_s == null ? "" : `probe ${Math.round(si.probe_age_s)}s old`, "", "loss"),
     fact("Link", si.link_ok ? "up" : "down",
          (localise.host && localise.host.iface) || "", si.link_ok ? "good" : "bad"),
     fact("Down", fmt(si.dl_mbps, 1) + " Mbps",
@@ -158,9 +214,9 @@ function facts(summary, localise) {
          uww == null ? "" : `warn ≤ ${fmt(uww, 0)}`,
          uww != null && si.ul_mbps != null && si.ul_mbps < uww ? "over" : ""),
     fact("en0 errors", String(si.en0_errors == null ? "–" : si.en0_errors),
-         si.en0_errors == null ? "no # iferrs in window" : "ierrs+oerrs+coll"),
+         si.en0_errors == null ? "no # iferrs in window" : "ierrs+oerrs+coll", "", "en0"),
     fact("Peer", fmt((localise.peer || {}).peer_ms, 1) + " ms",
-         (localise.peer || {}).peer || ""),
+         (localise.peer || {}).peer || "", "", "peer"),
   ];
   if (errs.rx_bytes != null) {
     tiles.push(fact("en0 since boot",
@@ -219,12 +275,15 @@ function rttChart(localise) {
   }
   const legend = document.getElementById("legend");
   legend.innerHTML = "";
+  legend.className = "legend col";
   for (const d of data) {
     const pts = d.pts.map(p => `${px(p.x).toFixed(1)},${py(p.y).toFixed(1)}`).join(" ");
     svg.appendChild(ns("polyline", { points: pts, fill: "none",
       stroke: COLORS[d.t], "stroke-width": 1.5, "stroke-linejoin": "round" }));
+    const meta = TARGET_META[d.t] || { host: "", what: "" };
     const sw = document.createElement("span"); sw.className = "key";
-    sw.innerHTML = `<span class="swatch" style="background:${COLORS[d.t]}"></span>${d.t}`;
+    sw.innerHTML = `<span class="swatch" style="background:${COLORS[d.t]}"></span>` +
+      `<b>${d.t}</b> ${meta.host} <span class="muted">— ${meta.what}</span>`;
     legend.appendChild(sw);
   }
   const w = localise.window || {};
@@ -249,6 +308,7 @@ function lossChart(localise) {
   all.forEach((d, i) => {
     const base = top + i * laneH + laneH - 8;
     text(svg, 6, base - 2, d.t, { fill: COLORS[d.t] });
+    text(svg, 20, base - 2, (TARGET_META[d.t] || {}).host || "", { "font-size": 9 });
     svg.appendChild(ns("line", { x1: 44, y1: base, x2: 980, y2: base,
       stroke: "#23262f" }));
     for (const p of d.pts) {
@@ -348,26 +408,21 @@ async function load() {
   const status = document.getElementById("status");
   status.textContent = summary.status;
   status.className = "pill " + summary.status;
-  document.getElementById("version").textContent = "v" + (summary.version || "?");
   document.getElementById("facts").innerHTML = facts(summary, localise);
-
-  const reading = localise.reading || {};
-  document.getElementById("reading-verdict").textContent = reading.verdict || "";
-  document.getElementById("reading-detail").textContent = reading.detail ||
-    "no reading available for this window";
-
-  const reasons = document.getElementById("reasons");
-  reasons.innerHTML = "";
-  const list = summary.status_reason || [];
-  if (!list.length) reasons.innerHTML = `<li class="muted">nothing to report</li>`;
-  for (const r of list) {
-    const li = document.createElement("li"); li.textContent = r; reasons.appendChild(li);
-  }
 
   rttChart(localise);
   lossChart(localise);
   speedChart(speed, (summary.status_inputs || {}).dl_warn_mbps);
 }
+document.getElementById("facts").addEventListener("click", (e) => {
+  const tile = e.target.closest(".fact.link");
+  if (tile) showInfo(tile.dataset.metric);
+});
+const modal = document.getElementById("modal");
+modal.addEventListener("click", () => modal.classList.remove("open"));
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") modal.classList.remove("open");
+});
 load();
 </script>
 </body>
