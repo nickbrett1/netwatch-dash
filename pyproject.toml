@@ -27,11 +27,3 @@ testpaths = ["tests"]
 
 [tool.ruff]
 src = ["src", "tests"]
-# producers/ are verbatim copies of the scripts running on mac-studio. Their
-# provenance (producers/README.md) depends on byte-identity, so they are never
-# reformatted or linted here — drift is caught by CI running them, not by ruff.
-#
-# pyproject.toml is genproj-owned (infra) and is overwritten on every
-# regeneration, so this has to be re-applied — docs/genproj-target-gap.md §7,
-# trap 2.
-extend-exclude = ["producers"]
