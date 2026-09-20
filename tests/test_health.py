@@ -251,3 +251,6 @@ def test_the_landing_page_is_the_drill_in(tmp_path):
     assert response.headers["content-type"].startswith("text/html")
     assert "netwatch-dash" in response.text
     assert "/api/localise" in response.text  # the history it draws
+    # Bandwidth is a single number on the tile; the daily runs behind it are the
+    # other half of "drill in", and live behind a different endpoint.
+    assert "/api/speed" in response.text
