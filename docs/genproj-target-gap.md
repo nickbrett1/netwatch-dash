@@ -448,3 +448,57 @@ the sense that matters: the container on the build step is now the generator's
 own output, not a hand-edit, so a regen no longer reverts it. The `TEMPORARY …
 DELETE THIS PLUGIN BLOCK` that this section used to describe has been removed,
 and trap 4 of §7 is retired with it.
+
+## 10. Fourth gap: a generation triggers two builds, and the release step races
+
+Found immediately after the `b9a2a58` regen, on the same generation (Buildkite
+builds 16 and 17, 2026-09-20). One generation produced **two builds on one
+commit**, both running the release step:
+
+| Build | Commit | Message | Source | State |
+| --- | --- | --- | --- | --- |
+| 16 | `b9a2a58` | `Initial commit: Generated project with 12 capabilities` | webhook | passed (created `v0.1.11`) |
+| 17 | `b9a2a58` | `First build (genproj)` | api | **failed** |
+
+Both resolved `LATEST=v0.1.10` → `TAG=v0.1.11`, both passed the generated
+existing-tag guard, and both pushed the tag. Build 16 won:
+
+```
+! [remote rejected] v0.1.11 -> v0.1.11
+    (cannot lock ref 'refs/tags/v0.1.11': reference already exists)
+```
+
+The guard is **check-then-act** —
+
+```bash
+if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+  echo "$TAG already exists on origin - nothing to release."
+  exit 0
+fi
+```
+
+— so it only protects a build that starts *after* the winner has finished. Its
+comment ("Retried or re-run builds must not fail on a tag that already exists")
+names the sequential case and misses the concurrent one. A check cannot be a
+lock; the remote is the only thing that can arbitrate this atomically.
+
+Two independent causes, and they are worth keeping separate:
+
+1. **A generation triggers two builds** — the push fires the webhook *and* the
+   generator starts a build through the API. That is a duplicate by
+   construction, so this is not a race we can lose only under bad luck; the
+   effect is deterministic on every generation that releases.
+2. **The release step is not safe to run concurrently**, whatever the trigger
+   does.
+
+Neither is a defect in anything this repo controls: the release step's commands
+are genproj's, and the double trigger is the generator's. Reported as
+[`nickbrett1/genproj` issue #39](https://github.com/nickbrett1/genproj/issues/39).
+
+**What it does and does not cost us.** The release is *correct* — build 16
+published `v0.1.11` with the payload and manifest, and the loser fails before it
+packs anything. The cost is a red build on every generation, which is worse than
+it sounds: a pipeline that is red for a reason everyone learns to ignore is a
+pipeline whose real reds stop being read. Until it is fixed, a red `release` job
+whose log ends in `cannot lock ref` is **expected**, not an incident — and the
+check is that the *other* build on the same commit passed.
