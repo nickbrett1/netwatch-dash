@@ -255,6 +255,12 @@ matrix - the pipeline still runs one build step uploading `dist/**`.
    an existing one, so pipeline provisioning can never be moved into an app-owned
    file. If a regen reverts the pipeline to a containerised build, the fix has
    been lost upstream and this trap returns.)
+   — **Retired 2026-09-20**, by the regen at `b9a2a58`. The pipeline came back
+   with a containerised build step carrying `RELEASE_TARGET` in the docker
+   plugin's `environment:` list, a native `smoke_aarch64_apple_darwin` gate, and
+   a release depending on both — i.e. §9's fix, emitted rather than hand-patched.
+   §9's `TEMPORARY` plugin block is gone with it. Re-verify on any future regen;
+   the check is still the point of regenerating.
 5. **A regen reverts `.gitignore`**, and genproj's copy does not ignore `dist/`
    or `release/`. `release/` holds a ~20 MB tarball with a CPython inside it, so
    an un-ignored `release/` is one `git add -A` away from committing a binary to
@@ -267,7 +273,8 @@ matrix - the pipeline still runs one build step uploading `dist/**`.
 ## 8. Second gap: a smoke gate that assumes the build step produced the payload
 
 Found while wiring the §7 fix, fixed on our side (`scripts/build-payload.sh`),
-**not yet fixed upstream**.
+and now **open upstream as `nickbrett1/genproj` PR #38** in exactly the shape
+argued for below.
 
 The smoke gate genproj landed with §7 is right about what it wants to do: run the
 payload before publishing it, on the one host in the fleet that can execute a
@@ -318,6 +325,42 @@ no place to put it. Either the build step needs an app-owned hook — a
 seeded-once pattern as `release-artifacts.sh` — or the smoke gate's contract needs
 to become "call the assembler, then run what it produced". Worth reporting;
 unfixed for now, and cheap for us because both files are app-owned.
+
+### Reported, and settled as: one assembler, two callers
+
+Reported to genproj-dev and open as **PR #38**. The shape it landed on is neither
+of the two alternatives sketched above, and the argument that excluded both is
+worth keeping:
+
+- **Not a build-step hook.** `dist/` is where `python -m build` writes the wheel
+  and what the build step uploads and the smoke gate downloads, so a payload root
+  materialised into `dist/` collides with both. And there is no version at build
+  time — the release step is what creates the tag — so a build-time assembler
+  would write a `build-info.json` that misreports its own release.
+- **Not smoke-gate-only.** The release step would then need its own assembler, and
+  there are two of them again — the exact drift this gap is about.
+
+So: **one assembler, called by both steps that need a payload**, version passed
+positionally because the two callers legitimately pass different ones (a smoke
+label; the release tag):
+
+```
+bash scripts/build-payload.sh <version> <output-root> [<input-dir>]
+```
+
+Both callers pass the **same** output root (`payload/`), which is the property
+that makes the gate meaningful. Seeded (app-owned, so it survives regen) only for
+the singular non-rust unit — a rust matrix links its payload directly, so a hook
+there would be noise — with a default body that copies the build output into the
+root, so a project whose `dist/` already *is* a payload root keeps its old
+behaviour without noticing.
+
+Note for adoption here: our `scripts/build-payload.sh` is already
+`<version> <payload-root> [<wheel-dir>]`, which matches the seeded contract
+exactly, so taking #38 costs us the duplicate assembly call inside
+`release-artifacts.sh` (the generated step will have done it already) and nothing
+else. It will also start writing `payload/` into the checkout, so `payload/`
+joins `dist/` and `release/` in `.gitignore` (trap 5).
 
 ## 9. Third gap: the darwin rule is applied to a step that does not build a Mach-O
 
@@ -373,3 +416,35 @@ native/no-container decision on the build unit actually producing a platform
 binary (rust), not on the target label alone — and, for a language whose
 generated commands must write into a Python environment, either keep those steps
 containerised or create a virtualenv before installing.
+
+### Resolved upstream (2026-09-20)
+
+Fixed in `nickbrett1/genproj` **PR #37**, squashed to `3b31389`, and the suggested
+shape above is the one that landed — with one refinement worth recording, because
+it is the general form:
+
+- `releaseBuildUnits` now stamps each unit with `platformBinary`: `true` for the
+  rust matrix (`cargo build --target` links a per-target binary), and
+  `language === "rust"` for the single unit. Written as a property of the
+  language rather than a bare `false`, so it stays truthful if the validation
+  guard that keeps `target` non-rust ever changes.
+- `renderBuildStep` decides `nativeDarwin = unit.platformBinary &&
+  isDarwinTarget(unit.target)` — "does **this step** produce a platform binary",
+  not "which host may run the artifact".
+- The **smoke gate keeps the target-based predicate**, deliberately. The two
+  questions are genuinely different and the asymmetry is the fix: the build step
+  must be able to *install itself*, the smoke gate must be able to *run the
+  payload*. A regen that ever "corrects" the smoke gate to match the build step
+  would have broken it.
+
+Verified end to end rather than assumed. Merging is not the same as deploying:
+`generate_project` is served by the deployed Cloudflare Worker, so the fix is
+only live once the Worker's own pipeline (Buildkite `genproj` #133) has finished.
+After that deploy, the regen at `b9a2a58` produced the correct pipeline on the
+first attempt, and the hand patch below was deleted.
+
+**The workaround is retired.** `.buildkite/pipeline.yml` is genproj-owned again in
+the sense that matters: the container on the build step is now the generator's
+own output, not a hand-edit, so a regen no longer reverts it. The `TEMPORARY …
+DELETE THIS PLUGIN BLOCK` that this section used to describe has been removed,
+and trap 4 of §7 is retired with it.

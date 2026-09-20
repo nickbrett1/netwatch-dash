@@ -127,9 +127,13 @@ Two consequences for **this** repo:
 The full list of things a regen would silently undo — six of them, including
 `pyproject.toml` (which loses the ruff exclusion), `.gitignore` (which does not
 ignore `dist/` or `release/`) and `RELEASING.md` — is in
-`docs/genproj-target-gap.md` §7. `.buildkite/pipeline.yml` is still overwritten,
-but that trap *retires* on the first regen: the generator now emits the native
-build step and the smoke gate itself.
+`docs/genproj-target-gap.md` §7. `.buildkite/pipeline.yml` is the exception: that
+trap **retired on the 2026-09-20 regen** (`b9a2a58`), which came back with the
+containerised build step, the native smoke gate and the release step's
+dependencies, all emitted by the generator rather than hand-patched
+(`docs/genproj-target-gap.md` §9). The file is still overwritten — it is still
+infra — but what it is overwritten *with* is now correct, so verifying it is a
+check rather than a repair.
 
 Also note: declaring `target` (singular) does **not** change
 `.buildkite/pipeline.yml`. Only the plural `targets` creates a build matrix;
