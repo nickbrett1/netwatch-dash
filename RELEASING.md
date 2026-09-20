@@ -69,6 +69,15 @@ names, ship one file per platform, sign or notarise, or add a launcher manifest.
 It packages `dist/` by default, and produces no assets if there is nothing
 there.
 
+> **This project does not do that.** `scripts/release-artifacts.sh` here packs a
+> launcher-shaped payload with a bundled arm64 CPython, published under the
+> declared triple `aarch64-apple-darwin`. The payload is assembled by
+> `scripts/build-payload.sh` and run before publication by
+> `scripts/smoke-launch.sh`. See `docs/release-payload.md` for what it builds and
+> `docs/genproj-target-gap.md` for why the label is a declaration and not a
+> filename. (This file is genproj-owned and regenerated — the pointer belongs to
+> `docs/`, trap 6 of that memo.)
+
 Asset **names** are a contract: anything fetching
 `releases/latest/download/<name>` depends on the exact string, so treat a name
 as frozen once something consumes it.
