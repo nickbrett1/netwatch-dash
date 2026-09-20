@@ -4,7 +4,9 @@
     "--sysctl",
     "net.ipv6.conf.all.disable_ipv6=1",
     "--cap-add=NET_ADMIN",
-    "--device=/dev/net/tun"
+    "--device=/dev/net/tun",
+    "--stop-timeout",
+    "30"
   ],
   "build": {
     "dockerfile": "Dockerfile"
@@ -30,7 +32,9 @@
   },
   "mounts": [
     "source=netwatch-dash-tailscale-state,target=/var/lib/tailscale,type=volume",
-    "source=${localEnv:HOME}/.ssh,target=/home/vscode/.ssh,type=bind"
+    "source=${localEnv:HOME}/.ssh,target=/home/vscode/.ssh,type=bind",
+    "source=${localEnv:HOME}/.doppler,target=/home/vscode/.doppler,type=bind",
+    "source=gemini-cli-settings,target=/home/vscode/.gemini,type=volume"
   ],
   "forwardPorts": [],
   "containerEnv": {
@@ -74,7 +78,10 @@
         "ms-azuretools.vscode-docker",
         "ms-python.python",
         "ms-python.vscode-pylance",
-        "charliermarsh.ruff"
+        "charliermarsh.ruff",
+        "doppler.doppler-vscode",
+        "saoudrizwan.claude-dev",
+        "GitHub.copilot"
       ]
     }
   }

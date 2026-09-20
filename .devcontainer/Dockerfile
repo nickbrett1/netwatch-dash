@@ -1,6 +1,9 @@
 FROM mcr.microsoft.com/devcontainers/python
 RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
-    && apt-get -y install --no-install-recommends git socat curl gnupg nodejs npm openssh-server mosh micro libevent-dev libncurses-dev pkg-config bison build-essential xclip
+    && apt-get -y install --no-install-recommends git socat curl gnupg nodejs npm openssh-server mosh micro libevent-dev libncurses-dev pkg-config bison build-essential xclip \
+    && curl -sLf --retry 3 --tlsv1.2 --proto "=https" 'https://packages.doppler.com/public/cli/gpg.DE2A7741A397C129.key' | gpg --dearmor -o /usr/share/keyrings/doppler-archive-keyring.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/doppler-archive-keyring.gpg] https://packages.doppler.com/public/cli/deb/debian any-version main" | tee /etc/apt/sources.list.d/doppler-cli.list \
+    && apt-get update && apt-get install -y doppler
 
 
 # Build a current tmux from source (Debian bookworm's apt tmux is old).
@@ -32,7 +35,17 @@ RUN if [ -d "$HOME/.oh-my-zsh" ]; then rm -rf "$HOME/.oh-my-zsh"; fi \
     && curl https://cursor.com/install -fsS | bash \
     && curl -fsSL https://antigravity.google/cli/install.sh | bash \
     && mkdir -p "$HOME/.local/bin"
-
+RUN GOOSE_ARCH="$(uname -m | sed 's/arm64/aarch64/')" \
+    && GOOSE_TAG="$(curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 https://api.github.com/repos/aaif-goose/goose/releases/latest | sed -n 's/.*"tag_name": "\([^"]*\)".*/\1/p')" \
+    && if [ -z "$GOOSE_TAG" ]; then echo "WARN: could not resolve latest goose tag; falling back to 'stable' release"; GOOSE_TAG=stable; fi \
+    && GOOSE_URL="https://github.com/aaif-goose/goose/releases/download/${GOOSE_TAG}/goose-${GOOSE_ARCH}-unknown-linux-gnu.tar.bz2" \
+    && echo "Downloading goose ${GOOSE_TAG} (${GOOSE_ARCH})..." \
+    && curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o /tmp/goose.tar.bz2 "$GOOSE_URL" \
+    && mkdir -p /tmp/goose-extract \
+    && tar -xjf /tmp/goose.tar.bz2 -C /tmp/goose-extract \
+    && install -m 0755 /tmp/goose-extract/goose "$HOME/.local/bin/goose" \
+    && "$HOME/.local/bin/goose" --version \
+    && rm -rf /tmp/goose.tar.bz2 /tmp/goose-extract
 
 # Put the locally installed tools on PATH for the non-root user
 ENV PATH="$USER_HOME_DIR/.local/bin:$PATH"
