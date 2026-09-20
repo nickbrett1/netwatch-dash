@@ -124,7 +124,7 @@ Five things it says, and why each is shaped the way it is:
 | `/api/probe` | the most recent `kind: "probe"` events (oldest first), `?limit=` 1–1000 | **2 — built** |
 | `/api/speed` | the most recent `kind: "speed"` events | **2 — built** |
 | `/api/link` | `media` history and the `# link_change` markers — renegotiation / bad-cable | 3 |
-| `/api/localise` | which segment is at fault: the csv targets (`gw`/`wire`/`wl`/`net`) and `# iferrs` deltas, with the `reading` verdict **and the fault condition it came from** (§7.1) | 3 |
+| `/api/localise` | which segment is at fault: the csv targets (`gw`/`wire`/`wl`/`net`) with their history (`series` — per minute for the newest six hours, hourly beyond, each row carrying `bucket_s`) and `# iferrs` deltas, with the `reading` verdict **and the fault condition it came from** (§7.1) | 3 |
 | `/api/incidents` | the `# loss` / `# burst_*` markers, `.last_alert`, `.rtt_streak` | 3 |
 
 `/healthz` names the ones that do not exist yet, with the reason, so a missing
@@ -142,6 +142,14 @@ an empty chart over a full file.
   rollup. A byte offset is only valid while the file grows, so the reader
   invalidates it on inode change or `size < offset` (memo v3 §2, item 8 — an open
   gap, specified but not implemented).
+- **The seed is the whole file, and the rollup keeps three days** (schema §3).
+  The seed used to be a bounded 4 MiB tail (~12 h), which capped the drill-in's
+  reach *silently*: a chart that stops twelve hours ago looks like a network that
+  was quiet twelve hours ago. The file is the producer's own rotated record, so
+  reading all of it is the honest seed; an explicit byte bound is still honoured
+  for a caller that wants one. The history is reported per minute for the newest
+  six hours and folded to hourly buckets beyond, each row carrying `bucket_s`, so
+  a three-day window costs ~430 points per target rather than ~4,300.
 - **`events.jsonl` is read as a bounded tail** (`events.py`, 1 MiB default).
   Cheap enough per request, but not unbounded, and the bounded read *also*
   sidesteps the rotation gap: there is no persisted offset to invalidate, so a

@@ -23,11 +23,19 @@ the window it actually read, and every answer carries `window` — `bytes`,
 `first_unixtime`, `last_unixtime`, `truncated` — so "no link change in the
 window" can never be mistaken for "no link change".
 
-**The first read is off the request path.** Seeding reads up to
-`csv_tail_bytes` (4 MiB ≈ 12 h at the measured rate); incremental reads after
-that are whatever the producer wrote since, which is a few kB. `RollupCache`
-runs the seed on a thread at start-up (`prewarm`) and serves the previous
-rollup while a refresh is in flight, so no request ever waits on the file.
+**The first read is off the request path.** Seeding reads the whole file
+(`csv_tail_bytes` defaults to `WHOLE_FILE`); incremental reads after that are
+whatever the producer wrote since, which is a few kB. `RollupCache` runs the seed
+on a thread at start-up (`prewarm`) and serves the previous rollup while a
+refresh is in flight, so no request ever waits on the file.
+
+The seed used to be a bounded 4 MiB tail (~12 h). That bound was right while the
+retention window was a day and the seed had to fit in it, but it also capped how
+far back the drill-in could reach, and it capped it *silently*: a dashboard whose
+charts stop twelve hours ago looks exactly like a network that was quiet twelve
+hours ago. The file is the producer's own record, ~8.4 MB/day and rotating on the
+producer's schedule, so the honest seed is all of it — the retention window, not
+the seed, is what decides how much is kept (§3).
 
 Per §1 the canonical time is `unixtime`. Samples carry it directly. Markers carry
 a *local* ISO timestamp and no zone, so they are converted through the configured
@@ -46,12 +54,28 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .parse import Drift, iface_error_deltas, parse_csv_line, parse_iferrs
 
-# The seed window: 4 MiB ≈ 12 h at the measured 8.4 MB/day. Bounded on purpose,
-# so a file that has grown to gigabytes still costs the same to start.
-DEFAULT_INITIAL_TAIL_BYTES = 4 << 20
-# Minutes kept. 24 h is 1,440 buckets × 4 targets, which is nothing, and it is
-# the window the panels are specified over.
-DEFAULT_RETENTION_S = 86400.0
+# Seed from the start of the file. Spelled as a sentinel rather than a byte count
+# because "read the whole thing" is a different rule from "read the newest N
+# bytes", and the two must not be confused at a call site: a negative or zero
+# tail means all of it, a positive one is a bound.
+WHOLE_FILE = 0
+# The seed window, in bytes from the end of the file, or WHOLE_FILE. The default
+# is the whole file (see the module docstring): the retention window is what
+# bounds the rollup, and a bounded seed silently shortened it.
+DEFAULT_INITIAL_TAIL_BYTES = WHOLE_FILE
+# Minutes kept. Three days is 4,320 buckets × 4 targets, which is nothing to hold,
+# and it is the window the drill-in reaches back over: the bandwidth panel already
+# shows weeks, so a latency drill-in that forgot after a day was the shorter half
+# of the same page.
+DEFAULT_RETENTION_S = 259200.0
+# How much of the newest history stays at per-minute resolution. Six hours is the
+# span a drill-in is read over when the question is "what just happened"; past it
+# the reader is looking for a trend, and a trend is read off hours, not minutes.
+DEFAULT_RECENT_MINUTES = 360
+# The bucket width the older history is folded into. An hour is the coarsest
+# bucket that still shows a bad hour as a bad hour instead of averaging it into a
+# good day, and it turns three days into 66 rows instead of 4,320.
+DEFAULT_BUCKET_MINUTES = 60
 # Markers kept. `# link_change` is rare; 500 is generous for the panel and bounds
 # what a burst of `# orbi` lines can hold in memory.
 DEFAULT_MARKER_LIMIT = 500
@@ -109,6 +133,34 @@ class Bucket:
             "rtt_ms_min": self.rtt_min,
             "rtt_ms_max": self.rtt_max,
         }
+
+
+def _merge_rows(rows: list[dict]) -> dict:
+    """Combine per-minute rows into one coarser bucket row.
+
+    The mean is re-weighted by the samples that were *measured*, not by the rows.
+    A bucket with one lost minute in it must read as a mean over the samples that
+    replied, for the same reason `Bucket.as_dict` gives a lossless minute its own
+    mean: folding a minute of total loss in as a quiet minute would let a bad
+    hour read as fine. The sum-a-mean step is exact — the per-minute `rtt_ms_avg`
+    times that minute's `measured` is that minute's `rtt_sum`, so nothing is lost
+    by not keeping the raw sums on the wire.
+    """
+    n = sum(row["n"] for row in rows)
+    loss = sum(row["loss"] for row in rows)
+    measured = n - loss
+    rtt_sum = sum((row["rtt_ms_avg"] or 0.0) * row["measured"] for row in rows)
+    minima = [row["rtt_ms_min"] for row in rows if row["rtt_ms_min"] is not None]
+    maxima = [row["rtt_ms_max"] for row in rows if row["rtt_ms_max"] is not None]
+    return {
+        "n": n,
+        "measured": measured,
+        "loss": loss,
+        "loss_pct": (100.0 * loss / n) if n else None,
+        "rtt_ms_avg": (rtt_sum / measured) if measured else None,
+        "rtt_ms_min": min(minima) if minima else None,
+        "rtt_ms_max": max(maxima) if maxima else None,
+    }
 
 
 @dataclass
@@ -188,6 +240,58 @@ class Rollup:
             if target in buckets
         ]
         return rows[-limit:] if limit > 0 else []
+
+    def series(
+        self,
+        target: str,
+        *,
+        recent_minutes: int = DEFAULT_RECENT_MINUTES,
+        bucket_minutes: int = DEFAULT_BUCKET_MINUTES,
+        limit: int = 0,
+    ) -> list[dict]:
+        """One target's whole history: recent minutes, older ones folded.
+
+        The drill-in reaches back over the retention window, which is days. Drawn
+        per minute that is ~4,300 points per target — more ink than screen, and
+        every point a single minute of jitter nobody reads. So the newest
+        `recent_minutes` are reported exactly as measured and everything older is
+        aggregated into `bucket_minutes` buckets.
+
+        Each row still carries `minute`, the minute it opens on, so the x axis
+        stays linear in time and an hour-wide row simply sits an hour after the
+        minute before it; `bucket_s` says how wide the row is, so a reader can
+        tell a quiet minute from a quiet hour. `limit` caps the rows returned,
+        oldest-first, keeping the newest — the same contract as `minute_series`.
+        """
+        rows = [
+            {"minute": minute, **buckets[target].as_dict()}
+            for minute, buckets in sorted(self.minutes.items())
+            if target in buckets
+        ]
+        if not rows:
+            return []
+        if recent_minutes > 0 and len(rows) > recent_minutes:
+            cutoff = rows[-recent_minutes]["minute"]
+            recent = [row for row in rows if row["minute"] >= cutoff]
+            older = [row for row in rows if row["minute"] < cutoff]
+        else:
+            recent, older = rows, []
+        out: list[dict] = []
+        if older and bucket_minutes > 0:
+            grouped: dict[int, list[dict]] = {}
+            for row in older:
+                grouped.setdefault(row["minute"] // bucket_minutes, []).append(row)
+            for key in sorted(grouped):
+                merged = _merge_rows(grouped[key])
+                merged["minute"] = key * bucket_minutes
+                merged["bucket_s"] = bucket_minutes * 60
+                out.append(merged)
+        elif older:
+            # A width of zero or less would divide by it; fall back to the
+            # per-minute rows rather than dropping the history on the floor.
+            out.extend({**row, "bucket_s": 60} for row in older)
+        out.extend({**row, "bucket_s": 60} for row in recent)
+        return out[-limit:] if limit > 0 else out
 
     def latest_of(self, target: str) -> dict | None:
         return self.latest.get(target)
@@ -403,7 +507,8 @@ def read(
 
     The three ways this can start over, all of them reported in `restarted`:
 
-    * no cursor yet — seed from the last `initial_tail_bytes`;
+    * no cursor yet — seed from the whole file, or from the last
+      `initial_tail_bytes` when that is a positive bound (`WHOLE_FILE` is 0);
     * the inode changed — the file was replaced (rotation), so the offset points
       into a different file and means nothing;
     * the file is shorter than the offset — it was truncated in place.
@@ -437,12 +542,16 @@ def read(
         reseed = "the file was replaced (inode changed), so the offset was dropped"
     elif stat.st_size < cursor.offset:
         reseed = "the file is shorter than the offset (truncated or rotated)"
-    elif stat.st_size - cursor.offset > max(4 * initial_tail_bytes, 1):
+    elif (
+        initial_tail_bytes > 0 and stat.st_size - cursor.offset > 4 * initial_tail_bytes
+    ):
         # A reader that has been starved (a suspended process, a stopped writer
         # that then caught up) does not replay the whole gap: the same reasoning
         # as the seed applies — take the newest bounded window and say so —
         # rather than spend seconds of a request-time refresh on data whose only
-        # distinguishing feature is being old.
+        # distinguishing feature is being old. A whole-file seed has no bound to
+        # exceed: the file is the producer's own rotated record, so reading the
+        # gap *is* reading the file.
         reseed = "more was written than the reader could follow, so the tail was re-seeded"
     if reseed is not None:
         if cursor.seeded:
@@ -450,7 +559,9 @@ def read(
             # files together under one timeline, which is exactly the misalignment
             # §1 exists to prevent.
             rollup = Rollup(path=path)
-        cursor.offset = max(0, stat.st_size - max(0, initial_tail_bytes))
+        cursor.offset = (
+            max(0, stat.st_size - initial_tail_bytes) if initial_tail_bytes > 0 else 0
+        )
         cursor.partial = ""
         cursor.seeded = True
         rollup.restarted = reseed

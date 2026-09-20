@@ -53,6 +53,28 @@ def fixture_csv() -> str:
     return (FIXTURES / "gateway_rtt_sample.csv").read_text(encoding="utf-8")
 
 
+def _minute_rows(target: str, start_minute: int, count: int, rtt_for) -> str:
+    """One sample per minute for `count` minutes, `rtt_for(i)` deciding each.
+
+    `rtt_for` returns the raw `rtt_ms` field, so an empty string is a lost probe
+    — the producer's own spelling of loss (§3) — rather than a zero.
+    """
+    return "".join(
+        f"2026-09-17T00:00:00.000,{(start_minute + i) * 60}.0,{target},{rtt_for(i)}\n"
+        for i in range(count)
+    )
+
+
+def _hour_aligned(minute: int) -> int:
+    """A minute index on an hour boundary, so a folded hour is exactly 60 minutes.
+
+    `series` buckets by `minute // 60`, so a stream that starts mid-hour gives its
+    first bucket a partial hour. Tests that count minutes inside an hour want the
+    stream to start on the boundary.
+    """
+    return (minute // 60) * 60
+
+
 def read_once(tmp_path: Path, text: str) -> csvrollup.Rollup:
     path = tmp_path / "gw.csv"
     path.write_text(text, encoding="utf-8")
@@ -452,6 +474,12 @@ def test_the_panels_answer_over_http(tmp_path):
     assert localise["thresholds"] == {"rtt_warn_ms": 25.0, "rtt_excess_ms": 10.0}
     assert "fault" in localise["reading"]
     assert "excess" in localise["reading"]["numbers"]
+    # The history key is `series`, not `minutes`: past the recent window the rows
+    # are hourly, and every row says how wide it is so the chart can draw both.
+    net = localise["targets"]["net"]
+    assert "minutes" not in net
+    assert net["series"]
+    assert {"bucket_s", "minute", "n", "loss_pct"} <= set(net["series"][0])
     summary = client.get("/api/summary").json()
     assert summary["status_inputs"]["forwarded_excess_ms"] == 10.0
 
@@ -480,3 +508,169 @@ def test_healthz_counts_the_drift_of_both_files(tmp_path):
     assert body["data"]["drift"]["gateway_rtt.csv"]["count"] == 0
     assert body["not_implemented"] == {}
     assert os.path.isdir(settings.home)
+
+
+def test_the_seed_reads_the_whole_file_unless_a_bound_is_given(tmp_path):
+    """The 4 MiB tail quietly capped how far back the drill-in could see.
+
+    The seed used to read the last 4 MiB (~12 h). That bound was right while the
+    retention window was a day, but it also meant the panel stopped at a point it
+    never named. The default is now the whole file — and a positive bound is
+    still honoured, so "whole file" did not quietly turn every seed into a full
+    read of a file that grows to gigabytes.
+    """
+    settings = make_settings(tmp_path, fixture_csv())
+    assert settings.csv_tail_bytes == csvrollup.WHOLE_FILE
+    assert settings.csv_retention_s == 259200.0
+
+    base = _hour_aligned(int(END_OF_WINDOW.timestamp()) // 60 - 480)
+    path = tmp_path / "long.csv"
+    path.write_text(
+        "ts_iso,unixtime,target,rtt_ms\n"
+        + _minute_rows("net", base, 4000, lambda i: "5.0"),
+        encoding="utf-8",
+    )
+    whole = csvrollup.read(
+        path,
+        csvrollup.Cursor(),
+        tz="UTC",
+        now_epoch=END_OF_WINDOW.timestamp(),
+        retention_s=259200.0,
+        initial_tail_bytes=csvrollup.WHOLE_FILE,
+    )
+    assert whole.window()["truncated"] is False
+    assert whole.window()["window_bytes"] == path.stat().st_size
+    assert whole.latest_of("net")["minute"] == base + 3999
+
+    bounded = csvrollup.read(
+        path,
+        csvrollup.Cursor(),
+        tz="UTC",
+        now_epoch=END_OF_WINDOW.timestamp(),
+        retention_s=259200.0,
+        initial_tail_bytes=4096,
+    )
+    assert bounded.window()["truncated"] is True
+    assert bounded.window()["window_bytes"] == 4096
+    assert bounded.samples < whole.samples
+
+
+def test_history_older_than_the_recent_window_is_folded_into_hours(tmp_path):
+    """The drill-in reaches back days; past the recent hours it reads in hours.
+
+    Eight hours of one-per-minute samples: the newest six stay per-minute and the
+    first two fold into two hourly rows. The fold has to be exact — an hour's mean
+    is the mean of its minutes — and each row carries `bucket_s`, so a reader can
+    tell a quiet minute from a quiet hour. The x axis stays linear in time: the
+    second hour opens 60 minutes after the first, and the newest minute row 60
+    minutes after that, which is what lets one polyline draw both resolutions.
+    """
+    base = _hour_aligned(int(END_OF_WINDOW.timestamp()) // 60 - 480)
+    path = tmp_path / "gw.csv"
+    path.write_text(
+        "ts_iso,unixtime,target,rtt_ms\n"
+        + _minute_rows(
+            "net", base, 480, lambda i: "10.0" if i < 60 else "20.0" if i < 120 else "30.0"
+        ),
+        encoding="utf-8",
+    )
+    rollup = csvrollup.read(
+        path,
+        csvrollup.Cursor(),
+        tz="UTC",
+        now_epoch=END_OF_WINDOW.timestamp(),
+        retention_s=259200.0,
+    )
+
+    series = rollup.series("net")
+    hours, minutes = series[:2], series[2:]
+    assert len(hours) == 2 and len(minutes) == 360
+    assert [row["bucket_s"] for row in hours] == [3600, 3600]
+    assert [row["rtt_ms_avg"] for row in hours] == [10.0, 20.0]
+    assert all(row["n"] == 60 for row in hours)
+    assert {row["bucket_s"] for row in minutes} == {60}
+    assert {row["rtt_ms_avg"] for row in minutes} == {30.0}
+    assert hours[1]["minute"] - hours[0]["minute"] == 60
+    assert minutes[0]["minute"] - hours[1]["minute"] == 60
+
+
+def test_a_folded_hour_is_averaged_over_the_minutes_that_replied(tmp_path):
+    """A lost minute must not be folded in as a quiet one.
+
+    Half of the hour's minutes are loss. Averaging those in as zero latency would
+    read the hour as 5 ms; over the minutes that replied it is 10 ms, which is
+    `Bucket.as_dict`'s rule applied across minutes instead of across samples.
+    """
+    base = _hour_aligned(int(END_OF_WINDOW.timestamp()) // 60 - 480)
+    path = tmp_path / "gw.csv"
+    path.write_text(
+        "ts_iso,unixtime,target,rtt_ms\n"
+        + _minute_rows("net", base, 480, lambda i: "" if i % 2 else "10.0"),
+        encoding="utf-8",
+    )
+    rollup = csvrollup.read(
+        path,
+        csvrollup.Cursor(),
+        tz="UTC",
+        now_epoch=END_OF_WINDOW.timestamp(),
+        retention_s=259200.0,
+    )
+
+    hour = rollup.series("net")[0]
+    assert hour["bucket_s"] == 3600
+    assert hour["n"] == 60
+    assert hour["loss"] == 30
+    assert hour["loss_pct"] == 50.0
+    assert hour["rtt_ms_avg"] == 10.0  # over the 30 that replied, not over 60
+
+
+def test_the_retention_window_now_reaches_three_days(tmp_path):
+    """24 h of retention was the other, harder cap on the drill-in's reach.
+
+    A sample from 2.9 days ago is kept and one from 3.5 days ago is dropped, so
+    the window is the three days it says it is rather than the day it used to be.
+    """
+    now = END_OF_WINDOW.timestamp()
+    now_minute = int(now // 60)
+    inside = now_minute - 4200  # ~2.9 days back
+    outside = now_minute - 5000  # ~3.5 days back
+    path = tmp_path / "gw.csv"
+    path.write_text(
+        "ts_iso,unixtime,target,rtt_ms\n"
+        f"2026-09-17T00:00:00.000,{outside * 60}.0,net,9.0\n"
+        + _minute_rows("net", inside, 60, lambda i: "5.0")
+        + _minute_rows("net", now_minute - 60, 60, lambda i: "6.0"),
+        encoding="utf-8",
+    )
+    rollup = csvrollup.read(
+        path, csvrollup.Cursor(), tz="UTC", now_epoch=now, retention_s=259200.0
+    )
+
+    series = rollup.series("net")
+    assert min(row["minute"] for row in series) == inside
+    assert 9.0 not in [row["rtt_ms_avg"] for row in series]
+
+
+def test_a_three_day_window_is_folded_to_a_readable_number_of_points(tmp_path):
+    """The payload guard the longer seed needs: three days must cost ~a day's worth.
+
+    Per minute over three days is ~4,300 points per target; folded it is ~430.
+    The series is the drill-in's whole history, so if this ever stops holding, one
+    page is carrying a hundred thousand numbers nobody can read.
+    """
+    now = END_OF_WINDOW.timestamp()
+    base = _hour_aligned(int(now // 60) - 4200)
+    path = tmp_path / "gw.csv"
+    path.write_text(
+        "ts_iso,unixtime,target,rtt_ms\n"
+        + _minute_rows("net", base, 4200, lambda i: "5.0"),
+        encoding="utf-8",
+    )
+    rollup = csvrollup.read(
+        path, csvrollup.Cursor(), tz="UTC", now_epoch=now, retention_s=259200.0
+    )
+
+    series = rollup.series("net")
+    assert len(series) < 500
+    assert series[0]["bucket_s"] == 3600
+    assert series[-1]["bucket_s"] == 60

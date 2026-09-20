@@ -561,7 +561,11 @@ class Snapshot:
         with the numbers it used.
         """
         threshold = _config_number(self.config, "RTT_WARN_MS")
-        series = {t: self.csv.minute_series(t, 120) for t in csvrollup.TARGETS}
+        # The drill-in reaches back over the rollup's whole retention window, not
+        # the last two hours. `series` keeps the newest hours per-minute and folds
+        # the older ones into hourly buckets, so "what just happened" stays sharp
+        # while "what has been happening for days" is still on the same axis.
+        series = {t: self.csv.series(t) for t in csvrollup.TARGETS}
         latest = {t: self.csv.latest_of(t) for t in csvrollup.TARGETS}
         return {
             "thresholds": {
@@ -569,7 +573,10 @@ class Snapshot:
                 "rtt_excess_ms": _config_number(self.config, "RTT_EXCESS_MS"),
             },
             "targets": {
-                t: {"latest": latest[t], "minutes": series[t]} for t in csvrollup.TARGETS
+                # `series`, not `minutes`: past the recent window these rows are
+                # hourly, and each carries `bucket_s` so the reader can tell.
+                t: {"latest": latest[t], "series": series[t]}
+                for t in csvrollup.TARGETS
             },
             "host": {
                 "iface": self.csv.iface(),

@@ -85,8 +85,12 @@ class Settings:
     # one missed run is jitter and three is 15 minutes of nothing.
     probe_stale_s: float = 900.0
     speed_stale_s: float = 172800.0
-    csv_tail_bytes: int = 4 << 20
-    csv_retention_s: float = 86400.0
+    # 0 means the whole file (`csvrollup.WHOLE_FILE`): the file is the producer's
+    # own rotated record and the retention window is what bounds the rollup, so
+    # there is nothing to gain by seeding from less than all of it. Spelled in the
+    # schema as a byte count, which is why it stays an int here.
+    csv_tail_bytes: int = 0
+    csv_retention_s: float = 259200.0
     csv_refresh_s: float = 5.0
     csv_stale_s: float = 900.0  # two missed daily runs
 
@@ -143,8 +147,8 @@ class Settings:
             speed_stale_s=_float_env(env, "NETWATCH_DASH_SPEED_STALE_S", 172800.0),
             # The CSV seed window. Bounded so that a year of growth does not
             # become a year of start-up: the tailer reads forward from here.
-            csv_tail_bytes=_int_env(env, "NETWATCH_DASH_CSV_TAIL_BYTES", 4 << 20),
-            csv_retention_s=_float_env(env, "NETWATCH_DASH_CSV_RETENTION_S", 86400.0),
+            csv_tail_bytes=_int_env(env, "NETWATCH_DASH_CSV_TAIL_BYTES", 0),
+            csv_retention_s=_float_env(env, "NETWATCH_DASH_CSV_RETENTION_S", 259200.0),
             csv_refresh_s=_float_env(env, "NETWATCH_DASH_CSV_REFRESH_S", 5.0),
             # How old the newest CSV sample may be before the forwarded-path
             # reading stops speaking for the link. The producer writes every 1-5 s,

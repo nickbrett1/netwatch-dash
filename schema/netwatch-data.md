@@ -90,6 +90,14 @@ Header: `ts_iso,unixtime,target,rtt_ms`. Empty `rtt_ms` = loss. `target` ∈
 - **Rotation/truncation is not handled by a persisted offset yet.** A byte
   offset is only valid while the file grows. The reader must invalidate it on
   inode change or `size < offset` (this is an open gap, not a solved one).
+- **How the dashboard reads it (2026-09-20).** The seed is the *whole file*, not
+  a bounded tail: the file is the producer's own rotated record, so the retention
+  window is what bounds the rollup, and a fixed-size seed silently shortened how
+  far back the panel could see. Retention is **three days** (4,320 minutes × 4
+  targets), and the drill-in reports the newest six hours per minute and folds
+  everything older into **hourly** rows — each row carries `bucket_s`, so a
+  quiet minute and a quiet hour do not read the same. Per minute over three days
+  would be ~4,300 points per target, which is more ink than screen.
 
 ### Drift measured against the live log
 

@@ -1,8 +1,9 @@
 """The landing page: a drill-in that shows the history the tile only summarises.
 
 The homepage tile answers "is it OK *now*" with five numbers. This page is what
-clicking it opens: the same verdict, the numbers behind it, and the per-minute
-history of the path -- all from endpoints the app already serves
+clicking it opens: the same verdict, the numbers behind it, and the history of
+the path -- per minute for the recent hours, hourly further back, the way the
+bandwidth panel reaches back weeks -- all from endpoints the app already serves
 (`/api/summary`, `/api/localise`, `/api/speed`), so the page costs three fetches
 and no second parse of the csv.
 
@@ -97,13 +98,13 @@ LANDING_HTML = """<!doctype html>
     <div class="facts" id="facts"><span class="muted small">loading…</span></div>
   </section>
   <section>
-    <h2>Round-trip time, per minute (ms)</h2>
+    <h2>Round-trip time (ms) — per minute, hourly further back</h2>
     <div class="legend" id="legend"></div>
     <svg id="chart" viewBox="0 0 1000 260" preserveAspectRatio="none"></svg>
     <p class="muted small" id="chart-note"></p>
   </section>
   <section>
-    <h2>Loss per minute</h2>
+    <h2>Loss</h2>
     <svg id="loss" viewBox="0 0 1000 150" preserveAspectRatio="none"></svg>
     <p class="muted small" id="loss-note"></p>
   </section>
@@ -147,8 +148,9 @@ const INFO = {
       "(RTT_ALERT is off on this host)." },
   loss: { title: "Path loss",
     body: "The share of probes in the window that got no reply, read from the " +
-      "probe log rather than the ping stream, and reported per minute. A minute " +
-      "in which nothing replied counts as 100% loss for that minute. Loss is worth " +
+      "probe log rather than the ping stream, and reported per minute for the " +
+      "recent window — an hour per bar further back. A span in which nothing " +
+      "replied counts as 100% loss for that span. Loss is worth " +
       "watching beside RTT because it is the signal that survives a link that is " +
       "saturated rather than broken." },
   en0: { title: "en0 errors",
@@ -256,10 +258,24 @@ function facts(summary, localise) {
 
 function series(targets, target) {
   const t = targets[target];
-  if (!t || !t.minutes) return [];
-  return t.minutes.map(m => ({ x: m.minute, y: m.rtt_ms_avg, n: m.n,
-                               measured: m.measured, loss: m.loss,
-                               loss_pct: m.loss_pct }));
+  if (!t || !t.series) return [];
+  // `bucket_s` is 60 for a per-minute row and wider for the folded older ones.
+  // The charts draw the x axis as a plain number of minutes since the epoch, so
+  // a bucket row simply lands where it belongs; carrying the width lets a label
+  // or a tooltip say "this point is an hour" instead of implying a minute.
+  return t.series.map(m => ({ x: m.minute, y: m.rtt_ms_avg, n: m.n,
+                              measured: m.measured, loss: m.loss,
+                              loss_pct: m.loss_pct, bucket_s: m.bucket_s || 60 }));
+}
+
+// "14:05" for a window inside a day, "Sep 18 14:05" once it spans days — because
+// a two-ended time-of-day label on a three-day axis names the same clock twice.
+function clockLabel(minute, dayScale) {
+  const d = new Date(minute * 60000);
+  return dayScale
+    ? d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit",
+                             minute: "2-digit" })
+    : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 function rttChart(localise) {
@@ -272,16 +288,20 @@ function rttChart(localise) {
   if (!data.length) {
     // "Nothing to draw" has two causes worth telling apart: the rollup has not
     // read the csv yet, or it read it and no probe replied.
-    const read = TARGETS.some(t => ((targets[t] || {}).minutes || []).length);
+    const read = TARGETS.some(t => ((targets[t] || {}).series || []).length);
     text(svg, 10, 24, read ? "no RTT measured" : "no samples in the window");
     note.textContent = read
-      ? "minutes are present but no RTT was measured — every probe in the window was lost"
+      ? "spans are present but no RTT was measured — every probe in the window was lost"
       : "the rollup has read nothing yet — this is not an empty network";
     return;
   }
   const xs = data.flatMap(d => d.pts.map(p => p.x));
   const ys = data.flatMap(d => d.pts.map(p => p.y)).sort((a, b) => a - b);
   const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  // Past a day the axis is read in dates, not clock times: "13:00 – 13:00" is
+  // true of a three-day window and says nothing about how long it is.
+  const dayScale = (x1 - x0) > 24 * 60;
+  const coarsest = Math.max(...data.flatMap(d => d.pts.map(p => p.bucket_s || 60)));
   const p98 = ys[Math.min(ys.length - 1, Math.floor(ys.length * 0.98))];
   // One gateway spike should not flatten every other line onto the axis.
   const ymax = Math.max(p98, warn ? warn * 1.2 : 0, 1);
@@ -292,6 +312,10 @@ function rttChart(localise) {
   svg.appendChild(ns("line", { x1: 44, y1: 234, x2: 980, y2: 234, stroke: "#23262f" }));
   text(svg, 6, 26, ymax.toFixed(0) + " ms");
   text(svg, 6, 236, "0");
+  // The two ends of the window, said in whatever unit the window is long in.
+  text(svg, 44, 252, clockLabel(x0, dayScale), { "font-size": 10, fill: "#6b7280" });
+  text(svg, 980, 252, clockLabel(x1, dayScale), { "text-anchor": "end",
+    "font-size": 10, fill: "#6b7280" });
   if (warn) {
     svg.appendChild(ns("line", { x1: 44, y1: py(warn), x2: 980, y2: py(warn),
       stroke: "#f0c14b", "stroke-width": 1, "stroke-dasharray": "4 4",
@@ -314,9 +338,11 @@ function rttChart(localise) {
   }
   const w = localise.window || {};
   const excess = (localise.thresholds || {}).rtt_excess_ms;
-  const span = `${new Date(x0 * 60000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` +
-               ` – ${new Date(x1 * 60000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+  const span = `${clockLabel(x0, dayScale)} – ${clockLabel(x1, dayScale)}`;
   note.textContent = `${span} · ${ys.length} samples` +
+    (coarsest > 60
+      ? ` · recent points are per minute, older ones ${Math.round(coarsest / 3600)} h averages`
+      : "") +
     (excess == null
       ? ""
       : ` · fault is the path sitting ≥ ${fmt(excess, 0)} ms above its own gateway line`
@@ -334,7 +360,10 @@ function lossChart(localise) {
   const xs = all.flatMap(d => d.pts.map(p => p.x));
   const x0 = Math.min(...xs), x1 = Math.max(...xs);
   const px = x => 44 + (x - x0) / Math.max(1, x1 - x0) * 936;
-  const w = Math.max(1, 936 / Math.max(1, x1 - x0));
+  // A bar is as wide as the span it stands for, so an hourly row draws an hourly
+  // bar rather than a one-pixel tick indistinguishable from a lost sample.
+  const span = Math.max(1, x1 - x0);
+  const barW = p => Math.max(1, ((p.bucket_s || 60) / span) * 936);
 
   all.forEach((d, i) => {
     const base = top + i * laneH + laneH - 8;
@@ -350,19 +379,21 @@ function lossChart(localise) {
       anyLoss = true;
       const pct = Math.max(p.loss_pct || 0, (lost / Math.max(1, p.n)) * 100);
       const h = Math.max(2, Math.min(laneH - 10, pct));
-      const r = ns("rect", { x: px(p.x).toFixed(1), y: base - h, width: w.toFixed(1),
-                             height: h, fill: "#ff6b6b" });
+      const r = ns("rect", { x: px(p.x).toFixed(1), y: base - h,
+                             width: barW(p).toFixed(1), height: h, fill: "#ff6b6b" });
       const title = ns("title", {});
       title.textContent = `${d.t} ${new Date(p.x * 60000).toLocaleString()} — ` +
-        `${lost}/${p.n} probes lost (${(p.loss_pct || 0).toFixed(1)}%)`;
+        `${lost}/${p.n} probes lost (${(p.loss_pct || 0).toFixed(1)}%)` +
+        ((p.bucket_s || 60) > 60 ? ` over ${Math.round(p.bucket_s / 3600)} h` : "");
       r.appendChild(title);
       svg.appendChild(r);
     }
   });
   const note = document.getElementById("loss-note");
   note.textContent = anyLoss
-    ? "each bar is a minute with at least one lost probe; hover for the count"
-    : `no loss recorded in ${samples} sampled minutes — the bars are absent because ` +
+    ? "each bar is a span with at least one lost probe — a minute near the right, "
+      + "an hour further left; hover for the count"
+    : `no loss recorded in ${samples} sampled spans — the bars are absent because ` +
       `the counts are zero, not because the chart failed`;
 }
 
