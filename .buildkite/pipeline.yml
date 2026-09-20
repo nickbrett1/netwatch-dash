@@ -56,7 +56,14 @@ steps:
         for pattern in "dist/**"; do
           buildkite-agent artifact download "$$pattern" .
         done
-      - bash scripts/smoke-launch.sh "dist"
+      - |
+        # The build output is a release INPUT (a wheel, a bundle), not a payload
+        # root. Assemble it with the same script and the same output root the
+        # release step uses, so this gate runs what the tarball will contain. The
+        # version is positional because the two callers pass different ones: a
+        # smoke label here, the release tag there.
+        bash scripts/build-payload.sh "$${SMOKE_VERSION:-0.0.0-smoke}" payload dist
+      - bash scripts/smoke-launch.sh "payload"
 
   - label: ":bookmark: Release"
     key: release
@@ -159,6 +166,11 @@ steps:
       - |
         VERSION="$$(cat .release-version)"
         TAG="$$(cat .release-tag)"
+        # The build output is a release INPUT (a wheel, a bundle), not a
+        # payload root: assemble it with the same script the smoke gate calls,
+        # into the same root, so what ships is what the gate ran. The version is
+        # the release tag resolved above.
+        bash scripts/build-payload.sh "$$VERSION" payload dist
         if [ -f scripts/release-artifacts.sh ]; then
           bash scripts/release-artifacts.sh "$$VERSION"
         else

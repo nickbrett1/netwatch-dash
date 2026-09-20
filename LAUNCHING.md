@@ -170,15 +170,20 @@ and `scripts/release-artifacts.sh` packs the contents of that directory as
 
 A **runnable bundle** and a **release artifact** are not the same thing. For a
 python or node project, `dist/` (a wheel, a bundle) is the right thing to publish
-and the wrong thing to launch: it has no `bin/`. The packed directory *is* the
-payload root — `scripts/release-artifacts.sh` packs `dist/` with `tar -C dist .`,
-so its contents land at the top of the tarball rather than under `dist/` — which
-means the entry point has to be at `dist/bin/netwatch-dash` before
-the packing runs. For a pure-python project that is a `python -m zipapp` bundle
-plus a small `bin/netwatch-dash` shim that execs it.
+and the wrong thing to launch: it has no `bin/`. So the pipeline *assembles* a
+payload root first: both the smoke gate and the release step call
+`scripts/build-payload.sh <version> <output-root> [<input-dir>]`, which puts the
+tree it builds — by default a copy of `dist/` — into `<output-root>` (`payload/`).
+`scripts/release-artifacts.sh` then packs that root with `tar -C <root> .`, so its
+contents land at the top of the tarball rather than under the root's name, which
+means the entry point has to be at `<root>/bin/netwatch-dash` when
+the packing runs. Because the gate runs the same assembled root, what it exercises
+is what ships. For a pure-python project that is a `python -m zipapp` bundle plus
+a small `bin/netwatch-dash` shim that execs it.
 
 A rust project gets this for free: the generated build step copies the binary to
-`build/<target>/bin/`, so a per-target tarball unpacks with `bin/` already in it.
+`build/<target>/bin/`, so a per-target tarball unpacks with `bin/` already in it —
+and there is no assembler step, because the build output *is* the payload root.
 
 Nothing upstream of the exec can catch a payload that is missing this. The
 manifest key resolves, the sha256 matches, the unpack succeeds, `current` flips —
