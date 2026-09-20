@@ -161,7 +161,10 @@ these hold:
 | the payload root holds `bin/netwatch-dash` | a payload that unpacks and then exits after one log line |
 | the entry point is executable | a lost execute bit |
 | `python/bin/python3.13` is a Mach-O — via `file` | an interpreter that is not a macOS binary at all |
-| the entry point answers `--version` or `--help` under a portable timeout | a payload that cannot start, which is the failure that used to reach a host first |
+| the entry point answers `--version` or `--help` under a portable timeout | a payload that cannot exec the interpreter, or whose package cannot be imported |
+| 127.0.0.1:<port> is free before starting | a squatter on the port — the gate would read *its* answers |
+| the payload starts for real (temp `HOME`, loopback port) and `/healthz` answers 200 with a `status` | an app that cannot bind or cannot serve — which `--version` never touches |
+| that answer names **this** payload's `build-info.json` path, and reports `found` | a payload that answers with someone else's response, or an assembly with no `build-info.json` |
 
 It is fail-closed on purpose, and the release step `depends_on` it, so a payload
 that cannot start cannot be published. Its output is captured and echoed on
@@ -171,12 +174,26 @@ prints exactly that — e.g. on a Linux host, `Cannot run macOS (Mach-O) executa
 in Docker: Exec format error`, which is the correct verdict there and proof the
 checks are live.
 
-The probes are deliberately `--version`/`--help` and nothing more. A native step
-is **not** sandboxed: `$HOME` on that machine holds live alerting state, and the
-build step's own `pip install -e` already writes to the agent's python. If this
-gate is ever upgraded to start the real server, it needs a temporary `HOME` and
-`NETWATCH_DASH_STATE`/`NETWATCH_DASH_GWCSV`/`NETWATCH_DASH_CONFIG` pointed at
-fixtures on a random loopback port — not the host's real ones.
+**The identity check is the one that is not decoration.** On 2026-09-20 this gate
+reported `/healthz -> status unknown … OK` for a payload that was never
+listening: a leftover devcontainer server was still being port-forwarded onto the
+agent, and "something answered" was accepted as "the thing I started answered".
+It compares the `build-info.json` path that `/healthz` derives from the running
+interpreter's prefix against the path under the payload root the gate just
+assembled, resolving both sides as real paths (on macOS `/tmp` is a symlink to
+`/private/tmp`, so the strings legitimately differ). A mismatch exits
+distinctively and stops the poll, because it cannot become true by waiting.
+
+Starting the real server needs the care the probes did not: a native step is
+**not** sandboxed, and `$HOME` on that machine holds live alerting state. So the
+gate runs the payload with a temporary `HOME` (and `NETWATCH_DASH_HOME`), on a
+loopback port the OS reports free rather than the default 8791 — which may well be
+the running dashboard on this very host — and it makes its HTTP request with the
+payload's *own* interpreter, so the gate depends on nothing the payload does not
+ship (no `curl`, no `jq`). With no `events.jsonl` in that empty home the status is
+`unknown`, which is the honest answer and is stable from run to run: the gate
+asserts the *shape* of the response, never a status that depends on host data
+(memo v3 §7).
 
 ### Where the smoked payload and the released one differ
 
@@ -306,11 +323,12 @@ genproj's generated step, not something this project chose.
   full 2012-line log as captured). `/api/summary`, `/api/probe` and `/api/speed`
   are built; `/api/link`, `/api/localise` and `/api/incidents` need the CSV
   rollup. `bin/netwatch-dash --version` / `--help` are answered before the ASGI
-  stack is imported, which is what the smoke gate probes.
-- **The smoke gate runs the payload but does not serve it.** The generated step
-  runs `build-payload.sh` → `smoke-launch.sh`, and the gate exercises
-  `--version`. Starting the app and curling `/healthz` on the assembled payload —
-  with a temp `HOME` and a loopback port, so it cannot touch the live alerting
-  state or collide with the real service on 8791 (memo v3 §7) — is the remaining
-  half, and it is `scripts/smoke-launch.sh`'s to add (app-owned, so it survives a
-  regen).
+  stack is imported, and the smoke gate now starts the payload and reads
+  `/healthz` back as well as probing those flags.
+- **The smoke gate serves the payload, and demands the answer come from it.** The
+  gate assembles, starts the payload on a free loopback port with a temporary
+  `HOME`, and reads `/healthz` with the payload's own interpreter — see "At smoke
+  time" above. What is still missing is an *app-level* check: the gate proves the
+  app binds and answers, not that it answers correctly, which is what `pytest`
+  does against captured fixtures. A gate that ran both would need fixtures on the
+  agent; the fixtures are in the repository, not the payload.

@@ -32,6 +32,22 @@
 # The alternative — running the wheel in place — would be a gate that passes
 # whether or not the assembly works, which is decoration.
 #
+# What "starts" means, and why it is two checks
+# ---------------------------------------------
+# The payload is checked twice, because it can fail in two unrelated ways:
+#
+#   * `--version` / `--help` — answered BEFORE the ASGI stack is imported, so
+#     this proves the interpreter execs and the package imports.
+#   * it is started for real, with a temporary HOME and on a loopback port the OS
+#     reports free, and `/healthz` is read back over HTTP with the payload's own
+#     interpreter. This is what proves the app binds and answers.
+#
+# The second check is the one a host's experience actually is. Adding it is how
+# this project found that the first check was passing payloads whose app could
+# not start: `--version` never touches FastAPI, so it cannot fail for that
+# reason. Both are kept — an import error and a bind error should not be told
+# apart by the same message.
+#
 # Contract
 # --------
 # Called with the wheel directory (directories) the build step uploaded:
@@ -45,11 +61,98 @@ set -euo pipefail
 
 ENTRY_NAME="netwatch-dash"
 PAYLOAD_SCRIPT="scripts/build-payload.sh"
+# Must match build-payload.sh's PROJECT: it names the share/<name>/ directory the
+# payload writes build-info.json into, which the serve check asserts a path in.
+PROJECT="netwatch-dash"
 PROBE_ARGS=(--version --help)
 # Cold start includes importing the package for the first time and writing its
 # bytecode with the BUNDLED interpreter (the payload ships no .pyc — see
-# build-payload.sh), so this is generous on purpose.
+# build-payload.sh), so this is generous on purpose. It is also the deadline for
+# the serve check below, which pays that same cold start and then one HTTP round
+# trip.
 TIMEOUT_SECS="${SMOKE_TIMEOUT:-60}"
+# The port the serve check binds. Left unset, a free one is asked of the OS (see
+# below); set it only to pin a specific port for a debugging run.
+SMOKE_PORT="${SMOKE_PORT:-}"
+
+# What "the payload works" means over HTTP, run with the payload's OWN
+# interpreter so the gate depends on nothing the payload does not ship (no curl,
+# no jq). One request, one JSON body, and two things demanded:
+#
+#   * a `status` field — a payload that answers 200 with a stack-trace page, an
+#     empty body, or someone else's JSON is not serving the dashboard, and the
+#     gate must not pass on the status code alone.
+#
+#   * that the answer came from THIS payload. The expected build-info.json path
+#     is passed in and must come back exactly; /healthz derives that path from
+#     the running interpreter's prefix (buildinfo.find), so it identifies the
+#     server rather than describing it. Without this the check is not a check:
+#     measured on mac-studio 2026-09-20, a leftover devcontainer server was still
+#     being port-forwarded onto the agent, and the gate reported
+#     "http://127.0.0.1:8792/healthz -> status unknown … OK" while the payload it
+#     had just built was not listening at all. "Something answered" is not
+#     "the thing I started answered", and the difference is the whole gate.
+#     `found` is demanded too: the payload is assembled WITH a build-info.json,
+#     so a payload that cannot find its own is a broken assembly, and /healthz
+#     says so itself.
+HEALTHZ_PROBE='
+import json, os, sys, urllib.request
+
+url = "http://127.0.0.1:%s/healthz" % sys.argv[1]
+expected = sys.argv[2]
+try:
+    with urllib.request.urlopen(url, timeout=5) as response:
+        status, body = response.status, response.read().decode("utf-8", "replace")
+except Exception as exc:
+    print("no answer from %s: %s" % (url, exc), file=sys.stderr)
+    sys.exit(1)
+if status != 200:
+    print("%s answered %s, not 200" % (url, status), file=sys.stderr)
+    sys.exit(1)
+try:
+    document = json.loads(body)
+except ValueError:
+    print("%s did not answer with JSON: %r" % (url, body[:200]), file=sys.stderr)
+    sys.exit(1)
+if not isinstance(document, dict) or "status" not in document:
+    print("%s answered JSON with no status: %r" % (url, body[:200]), file=sys.stderr)
+    sys.exit(1)
+build = document.get("build") or {}
+if not build.get("found"):
+    print("%s cannot report its own build: %r" % (url, build.get("error")), file=sys.stderr)
+    sys.exit(1)
+# Compared as real paths: /healthz reports what its own discovery produced, and
+# on macOS /tmp is a symlink to /private/tmp, so the string the caller passed in
+# and the string the server reports legitimately differ. Resolving both sides
+# compares the location, which is the thing being asked about.
+if os.path.realpath(build.get("path") or "") != os.path.realpath(expected):
+    print(
+        "%s was answered by a different process: it reports its build as %r, not %r"
+        % (url, build.get("path"), expected),
+        file=sys.stderr,
+    )
+    # Exit 2, not 1: this cannot become true by waiting, so the caller stops
+    # polling instead of spending the whole deadline re-asking a settled question.
+    sys.exit(2)
+print("%s -> status %s" % (url, document["status"]))
+'
+
+# Is this port ours to take? A connection that is ACCEPTED means something else
+# is already listening, and the gate would then be reading that server's answers
+# rather than the payload's. Checked before starting, so the failure is a clear
+# refusal instead of a confusing one after the fact. (The identity check above is
+# the real control; this one only buys a better message.)
+PORT_IS_FREE='
+import socket, sys
+
+probe = socket.socket()
+probe.settimeout(2)
+try:
+    probe.connect(("127.0.0.1", int(sys.argv[1])))
+except OSError:
+    sys.exit(0)
+sys.exit(1)
+'
 # build-info.json records a version; nothing in the gate reads it, and there is
 # no tag yet at smoke time (the release step creates it). Say so rather than
 # inventing a version number that looks real.
@@ -62,8 +165,9 @@ fi
 
 payloads=()
 workdirs=()
+tempfiles=()
 cleanup() {
-  local d
+  local d f
   for d in "${workdirs[@]:-}"; do
     # `if`, not `[ -n "$d" ] && rm -rf "$d"`: with an empty array the expansion is
     # one empty string, and a bare `[ -n "" ] && …` is the loop's last command,
@@ -74,6 +178,14 @@ cleanup() {
     # cleanup hook must not be able to fail the thing it is cleaning up after.
     if [ -n "$d" ]; then
       rm -rf "$d"
+    fi
+  done
+  # Temp FILES are tracked rather than removed inline, for the same reason the
+  # workdirs are: an iteration that `continue`s on failure would otherwise leak
+  # its logs, and those logs are exactly what a human needs when the gate is red.
+  for f in "${tempfiles[@]:-}"; do
+    if [ -n "$f" ]; then
+      rm -f "$f"
     fi
   done
   return 0
@@ -208,6 +320,103 @@ for root in "$@"; do
     failed=1
     continue
   fi
+  # Serves, and answers over HTTP.
+  #
+  # --version and --help are answered BEFORE the ASGI stack is imported (that is
+  # deliberate — see __main__.py), so they prove the interpreter execs and the
+  # package imports. They do not prove the app starts, binds, or answers a
+  # request, which is the only thing a host installing this payload does with it.
+  # Until this block existed, a payload whose FastAPI app could not start still
+  # passed the gate and failed on the host.
+  #
+  # Three things are deliberately not taken from the host:
+  #   * a temporary HOME, so the gate reads no real state. With no events.jsonl
+  #     the status is "unknown", which is the honest answer for an empty state
+  #     directory and is stable from run to run — the gate asserts the shape of
+  #     the response, not a status that depends on the host's data.
+  #   * a port the OS reports free. The default is 8791, and this gate runs on
+  #     mac-studio, where the real dashboard may already be bound to it; a clash
+  #     would be indistinguishable from a payload that cannot start.
+  #   * the payload's own interpreter for the HTTP request, so the gate is not
+  #     silently skipping the check on an agent that has no curl.
+  home="$(mktemp -d)"
+  workdirs+=("$home")
+  port="$SMOKE_PORT"
+  if [ -z "$port" ]; then
+    port="$("$interpreter" -c 'import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()' 2>/dev/null || true)"
+  fi
+  case "$port" in
+    '' | *[!0-9]*) port=18791 ;;
+  esac
+
+  # Refuse a port somebody else already holds, before starting anything. On
+  # mac-studio this is not theoretical: developer port forwards have squatted
+  # 8792/8793, and a gate that runs against them is reading a different process.
+  if ! "$interpreter" -c "$PORT_IS_FREE" "$port"; then
+    echo "smoke-launch: 127.0.0.1:$port already accepts connections - something else is listening there" >&2
+    echo "smoke-launch: refusing, because it would answer in place of the payload. Retry, or set SMOKE_PORT" >&2
+    failed=1
+    continue
+  fi
+
+  serve_log="$(mktemp)"
+  healthz_log="$(mktemp)"
+  tempfiles+=("$serve_log" "$healthz_log")
+  # The path /healthz must report back: the build-info.json this assembly wrote,
+  # which buildinfo.find resolves from the running interpreter's prefix.
+  expected_build_info="$payload/share/$PROJECT/build-info.json"
+  # NETWATCH_DASH_HOME is the variable the app reads (settings.py); setting HOME
+  # too keeps any tool that looks at it inside the temporary tree.
+  HOME="$home" NETWATCH_DASH_HOME="$home" NETWATCH_DASH_BIND="127.0.0.1:$port" \
+    "$entry" >"$serve_log" 2>&1 &
+  serve_pid=$!
+
+  # A deadline, not a fixed sleep: a cold start imports FastAPI and uvicorn with
+  # the bundled interpreter, which is not instant, and a fixed sleep would either
+  # be too short on a loaded agent or waste time on an idle one.
+  served=0
+  probe_rc=0
+  deadline=$((SECONDS + TIMEOUT_SECS))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if "$interpreter" -c "$HEALTHZ_PROBE" "$port" "$expected_build_info" >"$healthz_log" 2>&1; then
+      served=1
+      break
+    else
+      probe_rc=$?
+    fi
+    # A definite "somebody else answered" will not change by asking again.
+    if [ "$probe_rc" -eq 2 ]; then
+      break
+    fi
+    # A server that has already exited will not start answering; stop waiting and
+    # report its output instead of burning the whole deadline.
+    if ! kill -0 "$serve_pid" 2>/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+
+  kill "$serve_pid" 2>/dev/null || true
+  wait "$serve_pid" 2>/dev/null || true
+
+  if [ "$served" -ne 1 ]; then
+    echo "smoke-launch: $entry did not answer /healthz as this payload on 127.0.0.1:$port (within ${TIMEOUT_SECS}s)" >&2
+    if [ -s "$healthz_log" ]; then
+      echo "smoke-launch: the last request said:" >&2
+      sed -e 's/^/    | /' "$healthz_log" >&2
+    fi
+    if [ -s "$serve_log" ]; then
+      echo "smoke-launch: while serving, the payload said:" >&2
+      sed -e 's/^/    | /' "$serve_log" >&2
+    fi
+    failed=1
+    continue
+  fi
+  echo "smoke-launch: $(cat "$healthz_log")"
   echo "smoke-launch: $payload OK"
 done
 

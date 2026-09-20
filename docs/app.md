@@ -24,9 +24,12 @@ python -m netwatch_dash      serve (no flags) · --version · --help
 | `src/netwatch_dash/parse.py` | the tolerant parsers (the data contract, `schema/netwatch-data.md`) |
 
 `--version` and `--help` deliberately do not import the ASGI stack: the Buildkite
-smoke gate runs them against the assembled payload, and a gate that fails because
-of an import a *different* machine lacks is a gate failing for a reason that is
-not the payload's.
+smoke gate probes them against the assembled payload on the macOS agent, and a
+gate that fails because of an import a *different* machine lacks is a gate failing
+for a reason that is not the payload's. The gate then starts the payload for real
+and reads `/healthz` back, so "the flags answer" and "the app serves" are two
+separate verdicts rather than one check standing in for the other
+(`docs/release-payload.md`, "At smoke time").
 
 ## Configuration
 
