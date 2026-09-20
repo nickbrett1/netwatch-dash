@@ -18,6 +18,37 @@ steps:
     # tested instead of rebuilding it.
     artifact_paths:
       - "dist/**"
+    # TEMPORARY, and app-side rather than generator-side: this step is restored
+    # to a container by hand because the generator now makes it NATIVE for a
+    # darwin target, and a native step cannot install this project. Its commands
+    # (`pip install -e ".[dev]"`) target the agent's own Homebrew python 3.14,
+    # which refuses them under PEP 668:
+    #
+    #   error: externally-managed-environment
+    #   × This environment is externally managed
+    #
+    # Two things are wrong upstream, and the second is the real one:
+    #   1. `pip install` into a Homebrew python is blocked by design.
+    #   2. This step does not need to be native AT ALL. Its output is a
+    #      py3-none-any wheel — architecture-INDEPENDENT. Only a rust build step
+    #      links a Mach-O binary; for a python project the darwin-ness belongs to
+    #      the PAYLOAD (which scripts/build-payload.sh assembles, in the release
+    #      step) and to the smoke gate below, which is native and must be.
+    #
+    # So the darwin rule is being applied one step too early for a non-rust
+    # project. Reported to genproj-dev; DELETE THIS PLUGIN BLOCK when the fix
+    # lands and regenerate. Until then this file is hand-patched, which means a
+    # regen reverts it — docs/genproj-target-gap.md §9.
+    plugins:
+      - docker#v5.13.0:
+          image: "python:3.13-slim"
+          # The fleet is Apple silicon. Without this, docker resolves a
+          # multi-arch tag to linux/amd64 and runs the whole step emulated (with
+          # a warning, and native modules built for the wrong architecture).
+          platform: linux/arm64
+          workdir: /workdir
+          environment:
+            - RELEASE_TARGET
     commands:
       - python -m pip install --no-cache-dir -e ".[dev]"
       - python -m pip install --no-cache-dir build

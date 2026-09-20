@@ -315,3 +315,58 @@ no place to put it. Either the build step needs an app-owned hook — a
 seeded-once pattern as `release-artifacts.sh` — or the smoke gate's contract needs
 to become "call the assembler, then run what it produced". Worth reporting;
 unfixed for now, and cheap for us because both files are app-owned.
+
+## 9. Third gap: the darwin rule is applied to a step that does not build a Mach-O
+
+Found on the first real run after regenerating (Buildkite builds 12 and 13,
+2026-09-20). §7's fix makes the build step **native** for a darwin target, and
+for this project that step cannot run at all:
+
+```
+$ python -m pip install --no-cache-dir -e ".[dev]"
+error: externally-managed-environment
+
+× This environment is externally managed
+╰─> To install Python packages system-wide, try brew install xyz ...
+```
+
+The agent is macOS, so its `python3` is Homebrew's (3.14), and Homebrew marks
+itself externally managed — PEP 668 makes pip refuse to install into it. The
+generated commands (`pip install -e ".[dev]"`, then bare `ruff`/`pytest`) assume a
+container, where writing into the image's site-packages is the normal thing to
+do. §7 removed the container without changing the commands.
+
+Underneath that symptom is the real mistake: **the step does not need to be native
+at all.**
+
+| Step | Output | Needs a Mac? |
+| --- | --- | --- |
+| `build` (this project) | `netwatch_dash-0.1.0-py3-none-any.whl` | **No** — it is architecture-*independent* |
+| `release` | the packed tarball, assembled by `build-payload.sh` | No — cross-install, and the gates make it safe |
+| `smoke_<target>` | nothing; it *runs* the payload | **Yes** — a Mach-O cannot run in a Linux container |
+
+The darwin → "no docker plugin, macOS queue" rule is exactly right for a **rust**
+build step, because `cargo build --target aarch64-apple-darwin` links a Mach-O
+binary and only a Mac has the SDK and linker. For a non-rust project with a
+singular darwin target it fires on a step that produces a portable wheel, and buys
+nothing — while costing a working build.
+
+So `isDarwinTarget(unit.target)` is being consulted one step too early. The
+distinction it needs is not "is the target darwin" but "**does this step produce a
+platform binary**": true for a rust build unit, false for a python/node/java one.
+For non-rust, the darwin-ness lives in the *payload* (assembled by the app's own
+script, in the release step) and in the smoke gate, which is correctly native.
+
+**Worked around app-side, temporarily.** `.buildkite/pipeline.yml` is
+genproj-owned, so the build step's container was restored by hand, marked
+`TEMPORARY … DELETE THIS PLUGIN BLOCK when the fix lands`, and the smoke gate was
+left native. This is a workaround of exactly the kind §7 was meant to retire, so
+it is recorded here rather than done quietly: **a regen reverts it**, and until
+the upstream fix lands, a regenerated pipeline puts this project back to a build
+that cannot install itself.
+
+Reported to genproj-dev with the build logs. Suggested fix: gate the
+native/no-container decision on the build unit actually producing a platform
+binary (rust), not on the target label alone — and, for a language whose
+generated commands must write into a Python environment, either keep those steps
+containerised or create a virtualenv before installing.
