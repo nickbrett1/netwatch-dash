@@ -6,8 +6,11 @@ that date they existed **only on that one machine**, with no version control
 anywhere (`git rev-parse` fails in `~/netwatch` and `~/.local`) and no
 installer referencing them.
 
-Nothing here is modified. Do not treat this directory as the deployment path —
-see `deploy/` and `schema/netwatch-data.md`.
+Nothing here is modified by hand: these are the release's copies, and
+`deploy/install-host.sh` installs them to the paths named in
+`netwatch_dash.buildinfo.INSTALL_PATHS` when it wires a host. So **this is the
+deployment path now** — one artifact both populates and wires. `deploy/` and
+`schema/netwatch-data.md` describe the wiring around it.
 
 | File here | Origin on mac-studio | Role |
 | --- | --- | --- |
@@ -42,9 +45,12 @@ more. This is the case for co-location, recorded as it happens:
 | (this repo) | `gwping.py` gained `# iferrs` per §8 | Consumer must know the marker or it counts as drift forever |
 
 `producers/netwatch` was refreshed from the host after the second change; its
-sha256 is now `d728858a…`. `producers/gwping.py` deliberately differs from the
-host: it carries the `# iferrs` addition from schema §8, which is not deployed
-yet.
+sha256 is now `d728858a…`. `producers/gwping.py` carried the `# iferrs` addition
+from schema §8 and differed from the host until it was adopted there on
+2026-09-20 — after which the drift count went to 0 across all six, and
+`/api/summary` began reporting real `en0_errors` instead of `null`. That is the
+shape this whole section is about: the drift was not cosmetic, it was the
+consumer's §8 input missing entirely.
 
 **Rule that follows from this:** a copy here is evidence of what the producer
 *wrote at capture time*, never a claim about what is running *now*. Any
@@ -54,5 +60,9 @@ re-verified by `shasum`.
 
 `gwping.py`'s shebang is `#!/usr/bin/env python3` (Homebrew 3.14.7 if run by
 hand) but its launchd job invokes `/usr/bin/python3` (the Xcode CLT shim). One
-script, two interpreters depending on how it starts. Pin this explicitly when
-`deploy/install-host.sh` exists rather than inheriting both.
+script, two interpreters depending on how it starts. `deploy/install-host.sh`
+now exists and installs the plists **as they are**, so the two interpreters are
+still inherited rather than pinned — deliberately, because changing the
+interpreter a running producer executes under is a change to the alerting path
+and not one to make in the same breath as an installer. Still open; the
+installer is where it should be settled.

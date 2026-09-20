@@ -47,6 +47,11 @@ INSTALL_PATHS = {
     "probe_lan_tcp.py": "netwatch/probe_lan_tcp.py",
 }
 
+# In `producers/` but not a producer. It is provenance for a human, and
+# `scripts/build-payload.sh` leaves it out of the shipped digest set; the
+# installer has to leave it out of the copy set for the two to agree.
+IGNORED_PRODUCER_FILES = frozenset({"README.md"})
+
 
 def installed_path(name: str, home: Path) -> Path:
     """The path a producer is installed at on this host.
@@ -56,6 +61,27 @@ def installed_path(name: str, home: Path) -> Path:
     happened" must not look like "no drift".
     """
     return home / INSTALL_PATHS.get(name, f"netwatch/{name}")
+
+
+def installable_producers(producer_dir: Path, home: Path) -> list[tuple[str, Path]]:
+    """Every file in ``producer_dir`` this release would install, and where.
+
+    ``deploy/install-host.sh`` copies a payload's producers to the stable paths
+    the launchd jobs run, which makes "where would drift be?" and "where does
+    this go?" the same question. So they are the same table, read through
+    ``installed_path`` rather than re-derived in shell: a second copy of the
+    mapping is a second thing to be wrong, and the drift count would then be
+    measured at a path nothing was installed to.
+
+    Ordered by name so a run is reproducible and its output diffable.
+    """
+    if not producer_dir.is_dir():
+        return []
+    return [
+        (f.name, installed_path(f.name, home))
+        for f in sorted(producer_dir.iterdir())
+        if f.is_file() and f.name not in IGNORED_PRODUCER_FILES
+    ]
 
 
 def sha256(path: Path) -> str:

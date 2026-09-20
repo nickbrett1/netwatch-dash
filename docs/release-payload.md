@@ -312,11 +312,17 @@ genproj's generated step, not something this project chose.
   tomorrow may resolve a newer patch of a dependency. `build-info.json` makes
   that answerable after the fact; a lock file would prevent it. Decide before
   something depends on byte-reproducibility.
-- **The producers ship but are not adopted.** They are in the payload as the
-  comparison reference; `deploy/install-host.sh` does not yet copy them to
-  `~/netwatch/` and `~/.local/bin/`. That is the "co-release, co-adopt" half of
-  D1, and it overwrites files on the alerting path, so it is a deliberate
-  decision rather than a follow-up (memo v3 §6.1).
+- **The producers ship, and are now adopted.** They are in the payload as the
+  comparison reference *and* as the install set: `deploy/install-host.sh` copies
+  each one to the path `netwatch_dash.buildinfo.INSTALL_PATHS` names — the same
+  table `/healthz` compares against — before it installs the jobs that run them.
+  It is the "co-release, co-adopt" half of D1, and because it overwrites files on
+  the alerting path it keeps the previous copy beside itself as
+  `<path>.bak.<timestamp>` and reports what it replaced. On mac-studio this was
+  run for real on 2026-09-20: `gwping.py` was the one producer out of six that had
+  drifted, the install made the drift count 0, and the `# iferrs` marker the
+  consumer's §8 reads began arriving — the earlier finding that `/host/iface` was
+  unread was not a window artefact, the marker had never been written at all.
 - **`/healthz` reports the payload and the status; the CSV is still unread.** It
   reads `build-info.json`, the producer comparison, the whitelisted config and the
   bounded tail of `events.jsonl`, and returns a real drift count (0 across the

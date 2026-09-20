@@ -91,9 +91,12 @@ Five things it says, and why each is shaped the way it is:
 - **`producers.skew` and `producers.missing` are counted, and kept apart.** Skew
   is a host running a *different* producer; missing is a host running *none* of
   it. Both are normal on a machine the producers do not run on (a CI agent, a
-  laptop), so neither is an error — the count is the signal (schema §6). Today
-  `gwping.py` is expected to be in `skew`: the repo's copy already carries the
-  `# iferrs` marker and the host's does not (producers/README.md).
+  laptop), so neither is an error — the count is the signal (schema §6). On
+  mac-studio both are empty as of 2026-09-20, when `deploy/install-host.sh`
+  installed the payload's `gwping.py` over the drifted one; before that
+  `gwping.py` sat in `skew`, and the drifted copy was the reason `/api/summary`
+  reported `en0_errors: null` — the `# iferrs` marker §8 reads was never written
+  by the version running (producers/README.md).
 - **`launcher` is what started this payload, read back from the three variables
   `fetch-launch.sh` exports on the way out.** A payload started by hand (a test,
   `python -m netwatch_dash`) reports `found: false` rather than a guess. The
