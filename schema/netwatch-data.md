@@ -117,3 +117,61 @@ Because producers and consumer are released together:
 2. The parser **counts** unrecognised fields and markers and exposes the count
    on `/healthz` and the page. A silent schema change becomes a visible number.
 3. Unknown is `unknown` — never coerced to a good value, never to zero.
+
+---
+
+## 7. Health signal model (revised 2026-09-20)
+
+**Gateway ICMP RTT is demoted from health signal to diagnostic.** Measured
+2026-09-20: the Orbi's own echo reply floor is ~1.75 ms spiking to 76 ms, while
+traffic *through* it to 1.1.1.1 / 8.8.8.8 runs 3–7 ms avg with 0 % loss, en0 is
+clean (`Ierrs=Oerrs=Coll=0` across ~93 GB in), and the link is idle (~40 kbps).
+The delay is the consumer router's deprioritised control-plane CPU path, not the
+wire, not the host, not load. `>4.0 ms x3` on that signal fires on a healthy
+network (confirmed: an `rtt` alert fired 2026-09-20T12:54Z).
+
+| Signal | Source | Cadence | Role |
+| --- | --- | --- | --- |
+| **Packet loss** | probe `loss_pct`; empty `rtt_ms` in the CSV | 300 s / 1–5 s | **Health** — trusted across every path |
+| **Forwarded-path RTT** | CSV `net` (1.1.1.1), `wire` | 5 s / 1 s | **Health** — replaces gw as the latency canary |
+| **Link rate** | probe `media` + `# link_change` | 300 s | **Health** — renegotiation / bad-cable canary |
+| **en0 error counters** | *not recorded yet — see §8* | — | **Health (missing)** — the direct hardware answer |
+| **Throughput** | `kind:speed`; optional Mac↔peer iperf3 | daily | **Health** — capacity; the recommended gw-ICMP replacement |
+| **Peer RTT** | probe `peer_ms`, `peer_loss_pct` | 300 s | Health, with the caveat that the peer can itself be busy |
+| **Saturation** | probe `rx_mbps` vs `SAT_MBPS`, `saturated` | 300 s | Context; suppresses latency alarms on a busy link |
+| **Router state** | `# orbi` marker | irregular | Context: `internet_text`, satellites, devices |
+| **Gateway RTT** | CSV `gw`, probe `rtt_ms` | 1 s / 300 s | **Diagnostic only — never enters status or alerting** |
+
+### Status derivation (revises memo v2 §3.2)
+
+`crit` if loss > 0 on any probe **or** link ≠ 1000baseT **or** forwarded-path RTT
+(`net`/`wire`) above threshold **or** probe stale **or** en0 errors > 0.
+`warn` if forwarded RTT elevated, `rtt_streak > 0`, or throughput below
+threshold. **Gateway RTT is not an input.** It is rendered as a labelled
+diagnostic ("router CPU") so the localisation panel still attributes *where* a
+fault is — but a `gw` spike with `wire` flat now reads as **benign router
+control plane**, not "fault at the router LAN port". That inversion is a change
+to the panel legend, not just a threshold.
+
+### Sequencing consequence
+
+The primary latency signal (forwarded path) lives **only in the CSV**, so it
+needs the tailer + rollup (**Phase 3**). `events.jsonl` (Phase 2, cheap) still
+yields **loss, media, peer_ms, saturated** — a real tile without path latency,
+but not a path-latency trend. Either accept that, or pull the rollup forward.
+
+## 8. Producer addition required: interface error counters
+
+Nothing records en0 `Ierrs/Oerrs/Coll` today, so "is the hardware failing?" is a
+hand-run snapshot in the dashboard's only trend. Spec:
+
+- **Where:** `gwping.py`, on the existing `# orbi` cadence (or a new
+  `# iferrs` marker line in the CSV). Same writer, same file, no new daemon.
+- **Shape:** `# iferrs <ISO-ts> {"iface":"en0","ierrs":0,"oerrs":0,"coll":0,"rx_bytes":…,"tx_bytes":…}`
+- **Rules:** monotonic counters — the dashboard must store **deltas**, never the
+  raw value, and must treat a decrease (interface reset / counter wrap) as a
+  reset, not a negative rate. Field set is additive; the tolerant parser
+  ignores it until a fixture exists.
+- **Why it matters:** it is the one signal that directly answers "failing
+  hardware" rather than inferring it, and the network analysis could only
+  provide it as a point-in-time reading.
