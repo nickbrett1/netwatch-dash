@@ -56,7 +56,9 @@ payload is built from it by the same script `release-artifacts.sh` packs from.
 The gate therefore runs the real payload — same interpreter, same resolved
 dependencies, same entry-point shim the tarball will contain — rather than a
 thinner stand-in. Running the wheel in place would be a gate that passes whether
-or not the assembly works, which is decoration.
+or not the assembly works, which is decoration. (The one honest difference
+between what is smoked and what is released is two `build-info.json` fields; see
+"Where the smoked payload and the released one differ" below.)
 
 The cost is that the assembly runs twice per release (once on the Mac to smoke,
 once in the release container to pack). That is accepted: it buys a gate that
@@ -170,6 +172,32 @@ build step's own `pip install -e` already writes to the agent's python. If this
 gate is ever upgraded to start the real server, it needs a temporary `HOME` and
 `NETWATCH_DASH_STATE`/`NETWATCH_DASH_GWCSV`/`NETWATCH_DASH_CONFIG` pointed at
 fixtures on a random loopback port — not the host's real ones.
+
+### Where the smoked payload and the released one differ
+
+Precisely, because the difference is real and worth naming: they are assembled by
+the same script from the same wheel on the same commit, so they agree on the
+interpreter, every resolved dependency, the entry point and the producers. They
+differ in exactly two fields of `build-info.json`:
+
+| Field | Smoke step | Release step |
+| ----- | ---------- | ------------ |
+| `version` | `0.0.0-smoke` (`SMOKE_VERSION`) | the tag, e.g. `0.1.9` |
+| `built_at` | when the gate ran | when the release ran |
+
+Both are unknowable at smoke time: the release step is what *creates* the tag, so
+at build time there is no version to record. The consequence for `/healthz` is a
+rule, not a footnote: **the payload cannot be the source of its own release
+version.** It reports what it is (target, commit, interpreter, wheel digest,
+dependency versions, producer digests) and the release version comes from the
+outside — the manifest, or `FETCH_LAUNCH_VERSION`, which `scripts/fetch-launch.sh`
+exports to the process it starts. `build-info.json`'s `version` is a build-time
+label and is honest only when the release step wrote it.
+
+The same fact is why the `commit` field falls back to `git rev-parse HEAD`: the
+docker plugin forwards only the env vars *named* in its `environment:` list, and
+`BUILDKITE_COMMIT` is not one of them, so inside the release container it is
+unset. v0.1.7–v0.1.9 shipped with `"commit": ""` before that fallback existed.
 
 ## What is removed, and on what rule
 

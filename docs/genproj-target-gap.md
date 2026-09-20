@@ -304,7 +304,10 @@ So the assembly moved into an app-owned script and both callers use it:
 
 `scripts/smoke-launch.sh` was seeded by §7's change, and `scripts/` is app-owned,
 so the rewrite survives regeneration. The gate is not weakened: it runs the same
-assembly, so the tree it executes is the tree the tarball will contain.
+assembly from the same wheel, so it executes the payload the tarball will contain
+— differing in two `build-info.json` fields that cannot be known before the tag
+exists (`docs/release-payload.md`, "Where the smoked payload and the released one
+differ").
 
 **The upstream shape of this:** `github-release.target` now says "one artifact,
 platform-specific" but says nothing about whether the artifact is *built by the

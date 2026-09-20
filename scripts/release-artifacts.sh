@@ -39,6 +39,12 @@ ASSET="$PROJECT-$TARGET.tar.gz"
 log() { echo "$*"; }
 die() { echo "$*" >&2; exit 1; }
 
+# The docker plugin forwards only the env vars NAMED in its `environment:` list,
+# so BUILDKITE_COMMIT is unset inside the release container -- which is how the
+# first published manifests carried `"commit": ""`. The step has a checkout of
+# the commit it is releasing, so git answers when the environment does not.
+COMMIT="${BUILDKITE_COMMIT:-$(git rev-parse HEAD 2>/dev/null || true)}"
+
 # sha256sum is GNU coreutils; macOS ships shasum. The release step runs in a
 # Linux container today, but this file has to work natively on the Mac agent too
 # (the smoke gate's host), so the two are not interchangeable. The digest is
@@ -116,7 +122,7 @@ fi
   printf '  "name": "%s",\n' "$PROJECT"
   printf '  "version": "%s",\n' "$VERSION"
   printf '  "tag": "v%s",\n' "$VERSION"
-  printf '  "commit": "%s",\n' "${BUILDKITE_COMMIT:-}"
+  printf '  "commit": "%s",\n' "$COMMIT"
   printf '  "assets": {'
   first=1
   for file in "$OUT_DIR"/*.tar.gz; do

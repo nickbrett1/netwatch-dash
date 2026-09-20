@@ -340,7 +340,17 @@ fi
 # a payload that no longer has pip in it.
 mkdir -p "$PAYLOAD/share/$PROJECT"
 
-NB_NAME="$PROJECT" NB_VERSION="$VERSION" NB_COMMIT="${BUILDKITE_COMMIT:-}" NB_TARGET="$TARGET" \
+# The commit is read from git when BUILDKITE_COMMIT is absent, and that fallback
+# is not a nicety: the release step runs in a container, and the docker plugin
+# forwards only the env vars NAMED in its `environment:` list. BUILDKITE_COMMIT is
+# not one of them, so inside the release container it is simply unset — which is
+# how v0.1.7 through v0.1.9 shipped with `"commit": ""` (2026-09-20). The step
+# does have a checkout of the exact commit it is releasing, so git can answer.
+NB_COMMIT_RESOLVED="${BUILDKITE_COMMIT:-$(git rev-parse HEAD 2>/dev/null || true)}"
+[ -n "$NB_COMMIT_RESOLVED" ] ||
+  echo "warning: neither BUILDKITE_COMMIT nor git could name the commit; build-info.json will carry an empty one" >&2
+
+NB_NAME="$PROJECT" NB_VERSION="$VERSION" NB_COMMIT="$NB_COMMIT_RESOLVED" NB_TARGET="$TARGET" \
 NB_BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
 NB_PBS_RELEASE="$PBS_RELEASE" NB_PBS_PYTHON="$PBS_PYTHON" NB_PBS_ASSET="$PBS_ASSET" NB_PBS_SHA256="$PBS_SHA256" \
 NB_WHEEL_FILE="$(basename "${wheels[0]}")" NB_WHEEL_SHA256="$(sha256 "${wheels[0]}")" \
