@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -197,3 +199,40 @@ def producer_report(info: BuildInfo, home: Path) -> dict:
         "skew": skew,
         "missing": missing,
     }
+
+
+# The three variables `scripts/fetch-launch.sh` exports immediately before it
+# execs the payload. Spelled once, here, so the launcher and the reader cannot
+# drift on the name.
+LAUNCHER_ENV = {
+    "path": "FETCH_LAUNCH_PATH",
+    "version": "FETCH_LAUNCH_VERSION",
+    "sha256": "FETCH_LAUNCH_SHA256",
+}
+
+
+def launcher_report(env: Mapping[str, str] | None = None) -> dict:
+    """Which launcher started this payload, as far as that launcher could say.
+
+    ``fetch-launch.sh`` describes itself on the way out, because the question
+    "which launcher is this host running?" can only be answered by the process it
+    started — and it is the reason the launcher is a release asset rather than a
+    file a human copies onto each box. So the payload reads the three variables
+    back and reports them.
+
+    Two things are deliberately *not* claimed:
+
+    * A payload started by hand (a test, `python -m netwatch_dash`) has no
+      launcher to describe. That is ``found: false``, not a guess and not an
+      error — most runs are this.
+    * The values are the launcher's own belief about itself. Its ``version`` is
+      the release it last verified against and its ``sha256`` is of the file on
+      disk after its self-update, so both can lag this payload by one start. That
+      is by design, not a fault to correct here: a running process cannot report
+      a swap that takes effect next start, and pretending it can would be the
+      invention this module exists to avoid.
+    """
+    env = os.environ if env is None else env
+    report = {key: env.get(name) or None for key, name in LAUNCHER_ENV.items()}
+    report["found"] = report["path"] is not None
+    return report

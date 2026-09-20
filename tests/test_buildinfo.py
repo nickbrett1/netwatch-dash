@@ -165,3 +165,36 @@ def test_producer_report_with_no_shipped_producers_is_empty(tmp_path):
     assert report["skew"] == []
     assert report["missing"] == []
     assert report["shipped"] == {}
+
+
+def test_a_payload_started_by_hand_has_no_launcher_to_describe():
+    """Most runs are this: a test, `python -m netwatch_dash`. Say so, do not guess."""
+    report = buildinfo.launcher_report({})
+
+    assert report["found"] is False
+    assert report["path"] is None
+    assert report["version"] is None
+    assert report["sha256"] is None
+
+
+def test_the_launcher_that_started_the_payload_is_read_back():
+    env = {
+        "FETCH_LAUNCH_PATH": "/host/.local/share/netwatch-dash/fetch-launch.sh",
+        "FETCH_LAUNCH_VERSION": "0.1.18",
+        "FETCH_LAUNCH_SHA256": "a" * 64,
+        # A stray empty value is not a launcher either.
+        "FETCH_LAUNCH_EXTRA": "",
+    }
+    report = buildinfo.launcher_report(env)
+
+    assert report["found"] is True
+    assert report["path"] == "/host/.local/share/netwatch-dash/fetch-launch.sh"
+    assert report["version"] == "0.1.18"
+    assert report["sha256"] == "a" * 64
+    assert "FETCH_LAUNCH_EXTRA" not in report  # only the three agreed names
+
+
+def test_an_empty_launcher_path_is_still_not_found():
+    """A var that is set but empty is not an answer."""
+    report = buildinfo.launcher_report({"FETCH_LAUNCH_PATH": ""})
+    assert report["found"] is False

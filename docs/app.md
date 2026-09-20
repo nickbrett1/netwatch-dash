@@ -73,6 +73,7 @@ dashboard; a file it cannot read is a *reported absence*.
   "build": {"found": true, "path": "…", "tag": "v0.1.15", "target": "aarch64-apple-darwin",
             "built_at": "…", "python": {…}, "wheel": {…}, "dependencies": {…}},
   "producers": {"shipped": {…}, "installed": {…}, "skew": [], "missing": ["netwatch"]},
+  "launcher": {"found": true, "path": "…/fetch-launch.sh", "version": "0.1.18", "sha256": "…"},
   "config": {"RTT_ALERT": "off", "RTT_WARN_MS": "4.0"},
   "config_error": null,
   "data": {"drift_count": 0, "drift": {"unknown_fields": [], "bad_lines": 0, …}},
@@ -81,7 +82,7 @@ dashboard; a file it cannot read is a *reported absence*.
 }
 ```
 
-Four things it says, and why each is shaped the way it is:
+Five things it says, and why each is shaped the way it is:
 
 - **`version`/`commit` come from `build-info.json`, never from a constant.** A
   constant is true in exactly one of the two places this code runs — a wheel
@@ -93,6 +94,12 @@ Four things it says, and why each is shaped the way it is:
   laptop), so neither is an error — the count is the signal (schema §6). Today
   `gwping.py` is expected to be in `skew`: the repo's copy already carries the
   `# iferrs` marker and the host's does not (producers/README.md).
+- **`launcher` is what started this payload, read back from the three variables
+  `fetch-launch.sh` exports on the way out.** A payload started by hand (a test,
+  `python -m netwatch_dash`) reports `found: false` rather than a guess. The
+  values are the launcher's own belief about itself — its version and digest can
+  lag this payload by one start, because a swap takes effect next start — so they
+  are reported, never corrected here.
 - **`config` is the whitelist, so `NTFY_TOPIC` cannot appear.** `parse_config`
   drops it by not listing it; a test asserts the token cannot reach a response
   even when it is in the file (schema §5). Verified against the host's own config

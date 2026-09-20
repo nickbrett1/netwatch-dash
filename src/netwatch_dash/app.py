@@ -45,6 +45,7 @@ def healthz_body(
     snap = csv if isinstance(csv, snapshot.Snapshot) else snapshot.build(settings, now)
     info = buildinfo.load(settings.build_info_path)
     producers = buildinfo.producer_report(info, settings.home)
+    launcher = buildinfo.launcher_report()
 
     reasons = list(snap.status_reason())
     if not info.found:
@@ -68,6 +69,7 @@ def healthz_body(
         "commit": info.get("commit"),
         "build": info.as_dict(),
         "producers": producers,
+        "launcher": launcher,
         "config": snap.config,
         "config_error": snap.config_error,
         # Owed to schema §6: a producer/schema separation has to become a visible

@@ -65,6 +65,35 @@ def test_healthz_reports_what_this_payload_is(tmp_path):
     assert body["build"]["dependencies"] == {"fastapi": "0.141.1", "uvicorn": "0.53.0"}
 
 
+def test_healthz_says_which_launcher_started_it(tmp_path, monkeypatch):
+    """The launcher exports its own identity so *this* endpoint can report it."""
+    write_build_info(tmp_path)
+    monkeypatch.setenv("FETCH_LAUNCH_PATH", "/host/.local/share/netwatch-dash/fetch-launch.sh")
+    monkeypatch.setenv("FETCH_LAUNCH_VERSION", "1.2.3")
+    monkeypatch.setenv("FETCH_LAUNCH_SHA256", "b" * 64)
+
+    body = healthz_body(make_settings(tmp_path))
+
+    assert body["launcher"] == {
+        "found": True,
+        "path": "/host/.local/share/netwatch-dash/fetch-launch.sh",
+        "version": "1.2.3",
+        "sha256": "b" * 64,
+    }
+
+
+def test_healthz_with_no_launcher_does_not_invent_one(tmp_path, monkeypatch):
+    """A payload started by hand is the common case, and it is not a fault."""
+    write_build_info(tmp_path)
+    for name in ("FETCH_LAUNCH_PATH", "FETCH_LAUNCH_VERSION", "FETCH_LAUNCH_SHA256"):
+        monkeypatch.delenv(name, raising=False)
+
+    body = healthz_body(make_settings(tmp_path))
+
+    assert body["launcher"]["found"] is False
+    assert body["launcher"]["path"] is None
+
+
 def test_healthz_over_http_is_json_and_200(tmp_path):
     """A monitor reads the status line, not the body; it must never 500."""
     write_build_info(tmp_path)
