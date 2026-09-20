@@ -222,15 +222,17 @@ resolves that triple first (`Darwin`/`arm64` -> `["aarch64-apple-darwin",
 "any"]`), and the singular target deliberately does **not** create a build
 matrix - the pipeline still runs one build step uploading `dist/**`.
 
-### Five traps to know before regenerating
+### Six traps to know before regenerating
 
 1. **A regen does not refresh `scripts/release-artifacts.sh`.** Under
    `src/generator/genproj-overwrite.js`, `scripts/` is app-owned and a diverged
    app file is *never* replaced - only `cloud_login.sh` and the
-   wrangler/doppler helpers are genproj-owned scripts. Our copy (still the old
-   placeholder) will therefore keep packing `...-any.tar.gz` after a regen. To
-   take the generator's new wording, delete the file first so it re-seeds, or
-   resolve that one path to `overwrite` in the regen call.
+   wrangler/doppler helpers are genproj-owned scripts. Ours is therefore safe
+   from a regen, and also *invisible* to one: the generator's newer wording (the
+   singular-target key) will not reach it. That is the right trade here — ours is
+   the one that bundles an interpreter, and the seeded script packs a plain
+   `dist/`, so taking the generator's copy would mean giving up the
+   launcher-shaped payload again (`docs/release-payload.md`).
 2. **A regen *does* overwrite `pyproject.toml`** (infra). Our
    `[tool.ruff] extend-exclude = ["producers"]` is not generator-owned and would
    be lost - re-apply it after the regen, or upstream the exclusion.
@@ -241,16 +243,75 @@ matrix - the pipeline still runs one build step uploading `dist/**`.
    arm64 CPython (the launcher-shaped tree in the §10.2 rewrite). Land the
    declaration and the bundled payload together, never the label alone.
    — Done: the declaration and the bundled interpreter landed in one commit.
-4. **A regen reverts `.buildkite/pipeline.yml`, which is where the release step's
-   *provisioning* lives.** The payload is assembled in the fleet's Linux/arm64
-   container, so the macOS bundle is built by cross-install and the architecture
-   assertions in `scripts/release-artifacts.sh` are what make that safe. Running
-   the payload natively - and running it *at all* before publishing - needs the
-   release step (or a new step) re-provisioned without the docker plugin. Note
-   that `buildkite-agent pipeline upload` can only **add** a step, never
-   re-provision an existing one, so this cannot be pushed entirely into an
-   app-owned file: if a regen reverts the pipeline, re-check this first.
+4. **A regen reverts `.buildkite/pipeline.yml`.** This was the trap that made the
+   §7 fix necessary — the release step was provisioned *inside* a Linux/arm64
+   container, so a macOS payload could never be executed by CI. §7's change means
+   the generator now emits that provisioning itself (native build step, native
+   `smoke_<target>` gate), so **this trap retires on the first regen**: the
+   regenerated pipeline should carry a no-plugin build step and the smoke gate.
+   Verify it against `.buildkite/pipeline.yml` after regenerating — that check is
+   the point of regenerating at all. (Still true and worth knowing:
+   `buildkite-agent pipeline upload` can only **add** a step, never re-provision
+   an existing one, so pipeline provisioning can never be moved into an app-owned
+   file. If a regen reverts the pipeline to a containerised build, the fix has
+   been lost upstream and this trap returns.)
 5. **A regen reverts `.gitignore`**, and genproj's copy does not ignore `dist/`
    or `release/`. `release/` holds a ~20 MB tarball with a CPython inside it, so
    an un-ignored `release/` is one `git add -A` away from committing a binary to
    history. Re-add both entries after a regen (this one is worth upstreaming).
+6. **A regen overwrites `RELEASING.md`**, which carries a blockquote pointing
+   readers at this project's payload shape. It is infra, so the pointer goes with
+   it; re-add it after a regen. Everything durable lives in `docs/`, which
+   genproj does not emit and a regen does not touch.
+
+## 8. Second gap: a smoke gate that assumes the build step produced the payload
+
+Found while wiring the §7 fix, fixed on our side (`scripts/build-payload.sh`),
+**not yet fixed upstream**.
+
+The smoke gate genproj landed with §7 is right about what it wants to do: run the
+payload before publishing it, on the one host in the fleet that can execute a
+macOS binary, and let the release depend on it. But its contract for *where the
+payload is* cannot hold for a payload that has to be assembled:
+
+```yaml
+      - |
+        for pattern in "dist/**"; do
+          buildkite-agent artifact download "$pattern" .
+        done
+      - bash scripts/smoke-launch.sh "dist"
+```
+
+with the seeded script documenting it as:
+
+> Each root is a LAUNCHING.md payload: it must contain `bin/<name>` …
+
+`dist/` is the payload root for a project whose build output **is** its payload —
+a Node bundle, a wheel run in place. For this project `dist/` holds a wheel, and
+the payload root (with `bin/netwatch-dash` and a bundled CPython) does not exist
+until something assembles it. Assembling it from the build step is not available
+either: the build step's commands are genproj's, and they are `pip install`,
+`python -m build`, `ruff`, `pytest` — with no hook to add a step of our own
+(`buildkite-agent pipeline upload` can only *add* steps, never extend an existing
+one, and the pipeline file itself is regenerated).
+
+So the assembly moved into an app-owned script and both callers use it:
+
+| Caller | Uses the payload root to |
+| --- | --- |
+| `scripts/smoke-launch.sh <wheel-dir>` | assemble, then **run** it (fail-closed gate) |
+| `scripts/release-artifacts.sh <version>` | assemble, then **pack** it |
+
+`scripts/smoke-launch.sh` was seeded by §7's change, and `scripts/` is app-owned,
+so the rewrite survives regeneration. The gate is not weakened: it runs the same
+assembly, so the tree it executes is the tree the tarball will contain.
+
+**The upstream shape of this:** `github-release.target` now says "one artifact,
+platform-specific" but says nothing about whether the artifact is *built by the
+build step* or merely *packed from* it. A payload that needs an assembly step
+(a bundled interpreter, a vendored runtime, anything signed in a later step) has
+no place to put it. Either the build step needs an app-owned hook — a
+`scripts/build-payload.sh` the generated step calls if present, which is the same
+seeded-once pattern as `release-artifacts.sh` — or the smoke gate's contract needs
+to become "call the assembler, then run what it produced". Worth reporting;
+unfixed for now, and cheap for us because both files are app-owned.

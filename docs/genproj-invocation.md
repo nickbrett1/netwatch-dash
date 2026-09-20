@@ -107,15 +107,29 @@ Two consequences for **this** repo:
    `resolutions: { "scripts/release-artifacts.sh": "overwrite" }` — but note the
    seeded script packs a plain `dist/` tarball, so taking it means giving up the
    launcher-shaped payload again.
+
+   Two more app-owned scripts now matter for the same reason, and a regen leaves
+   all three alone:
+
+   | Script | Origin | Why we diverge |
+   | --- | --- | --- |
+   | `scripts/release-artifacts.sh` | seeded, rewritten by hand | packs the launcher-shaped payload under the declared triple |
+   | `scripts/build-payload.sh` | ours entirely | the assembly genproj has no place for (`docs/genproj-target-gap.md` §8) |
+   | `scripts/smoke-launch.sh` | seeded by the §7 change, rewritten | assembles before running, because `dist/` is a wheel here, not a payload root |
+
+   A regen will therefore *seed* `smoke-launch.sh` for a project that has none,
+   and leave ours exactly as it is.
 2. **`pyproject.toml` is infra → a regen overwrites it.** This loses
    `[tool.ruff] extend-exclude = ["producers"]` (added so the verbatim host
    producer copies are never reformatted). Re-apply it after any regeneration, or
    upstream the exclusion.
 
-The full list of things a regen would silently undo — five of them, including
-`.buildkite/pipeline.yml` (where the release step's provisioning lives) and
-`.gitignore` (which does not ignore `dist/` or `release/`) — is in
-`docs/genproj-target-gap.md` §7.
+The full list of things a regen would silently undo — six of them, including
+`pyproject.toml` (which loses the ruff exclusion), `.gitignore` (which does not
+ignore `dist/` or `release/`) and `RELEASING.md` — is in
+`docs/genproj-target-gap.md` §7. `.buildkite/pipeline.yml` is still overwritten,
+but that trap *retires* on the first regen: the generator now emits the native
+build step and the smoke gate itself.
 
 Also note: declaring `target` (singular) does **not** change
 `.buildkite/pipeline.yml`. Only the plural `targets` creates a build matrix;

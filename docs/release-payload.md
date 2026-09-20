@@ -1,11 +1,17 @@
 # The release payload
 
-What `scripts/release-artifacts.sh` builds, why it is keyed by a Rust triple, and
-what verifies it before it is published.
+What the payload is, why it is keyed by a Rust triple, and what verifies it
+before it is published.
 
-Built by `bash scripts/release-artifacts.sh <version>`; the release step calls it
-with the version it just tagged. Output lands in `release/` (override:
-`OUT_DIR=…`), which the release step uploads whole.
+Three scripts, one payload:
+
+| Script | Job | Called by |
+| ------ | --- | --------- |
+| `scripts/build-payload.sh <version> <root> [<wheel-dir>]` | **assembles** the payload root | the two below |
+| `scripts/release-artifacts.sh <version>` | **packs** it into `release/` and writes the manifest | the release step, with the version it just tagged |
+| `scripts/smoke-launch.sh <wheel-dir>` | **runs** it before publication | the smoke step, on the macOS agent |
+
+`release/` is uploaded whole by the release step (override: `OUT_DIR=…`).
 
 ## The shape
 
@@ -27,6 +33,34 @@ share/netwatch-dash/schema/       the data contract they are held to
 share/netwatch-dash/deploy/       install-host.sh + the plists it installs
 share/netwatch-dash/build-info.json   what this payload is; /healthz reads it
 ```
+
+## Why assembly is its own script
+
+The payload root has to exist before it can be either **packed** or **run**, and
+those two happen in different Buildkite steps on different hosts:
+
+```
+build step   (native macOS)   python -m build        →  dist/*.whl
+smoke step   (native macOS)   smoke-launch.sh dist   →  assemble → run → gate
+release step (linux/arm64)    release-artifacts.sh   →  assemble → pack → publish
+```
+
+genproj's smoke gate assumes the payload root *is* what the build step uploaded,
+and calls `bash scripts/smoke-launch.sh dist`. That is true for a plain wheel.
+It is not true for this project, because the payload carries a CPython and has to
+be assembled — and the build step's commands are genproj-owned, so they cannot be
+extended to assemble it.
+
+So the argument `smoke-launch.sh` receives is a *wheel directory*, and the
+payload is built from it by the same script `release-artifacts.sh` packs from.
+The gate therefore runs the real payload — same interpreter, same resolved
+dependencies, same entry-point shim the tarball will contain — rather than a
+thinner stand-in. Running the wheel in place would be a gate that passes whether
+or not the assembly works, which is decoration.
+
+The cost is that the assembly runs twice per release (once on the Mac to smoke,
+once in the release container to pack). That is accepted: it buys a gate that
+executes the artifact, and the assembly is a cached download plus a pip resolve.
 
 ## Why the triple is honest here
 
@@ -85,9 +119,12 @@ The last point is why the next section exists.
 
 ## The gates
 
-The script cannot execute what it builds — the payload's platform is the one it
-is not running on. So the payload is *checked*, and the checks are the ones that
-would have caught the original bug one layer down:
+There are two layers, and they catch different things.
+
+**At assembly time** (`build-payload.sh`), because the assembling host cannot
+execute what it builds — the payload's platform is generally not the assembler's
+— so the payload is *checked*, with the checks that would have caught the
+original bug one layer down:
 
 | Gate | Catches |
 | ---- | ------- |
@@ -107,6 +144,32 @@ refusing to publish: the payload contains binaries for another platform.
 `pydantic_core` is the interesting case: every other dependency resolves to a
 `py3-none-any` wheel, so it is the one file in the payload whose architecture is
 actually decided by a wheel tag.
+
+**At smoke time** (`smoke-launch.sh`, on the Mac), because checks are not
+execution. The gate assembles the payload, then refuses to pass unless all of
+these hold:
+
+| Check | Catches |
+| ----- | ------- |
+| the payload root holds `bin/netwatch-dash` | a payload that unpacks and then exits after one log line |
+| the entry point is executable | a lost execute bit |
+| `python/bin/python3.13` is a Mach-O — via `file` | an interpreter that is not a macOS binary at all |
+| the entry point answers `--version` or `--help` under a portable timeout | a payload that cannot start, which is the failure that used to reach a host first |
+
+It is fail-closed on purpose, and the release step `depends_on` it, so a payload
+that cannot start cannot be published. Its output is captured and echoed on
+failure: this runs on an agent nobody logs into interactively, and the difference
+between *cannot exec* and *raised on import* is the whole diagnosis. The gate
+prints exactly that — e.g. on a Linux host, `Cannot run macOS (Mach-O) executable
+in Docker: Exec format error`, which is the correct verdict there and proof the
+checks are live.
+
+The probes are deliberately `--version`/`--help` and nothing more. A native step
+is **not** sandboxed: `$HOME` on that machine holds live alerting state, and the
+build step's own `pip install -e` already writes to the agent's python. If this
+gate is ever upgraded to start the real server, it needs a temporary `HOME` and
+`NETWATCH_DASH_STATE`/`NETWATCH_DASH_GWCSV`/`NETWATCH_DASH_CONFIG` pointed at
+fixtures on a random loopback port — not the host's real ones.
 
 ## What is removed, and on what rule
 
@@ -166,23 +229,32 @@ Docker: Exec format error` — which is the *expected* result on Linux, and also
 proof the entry-point shim resolved: `bin/netwatch-dash` found the interpreter
 and the kernel refused the wrong-platform binary.
 
-## How CI builds it, and the gap that remains
+## How CI builds it
 
-The release step runs in the fleet's container (`python:3.13-slim`,
-`linux/arm64`, from `.buildkite/pipeline.yml`), so this script assembles the
-payload **cross-platform** and the gates above are what make that safe rather
-than trusting. The agent is natively arm64 macOS — the docker plugin is the only
-reason a macOS binary cannot execute there.
+The pipeline is genproj's, and since the singular-`target` fix (2026-09-20,
+`docs/genproj-target-gap.md` §7) it provisions the right steps for a darwin
+target — no container, because a macOS binary cannot be linked in a Linux one:
 
-So the payload is currently checked but never *run* before publication. Closing
-that is the macOS smoke step: run `bin/netwatch-dash` on the exact artifact, with
-a temporary `HOME` and `NETWATCH_DASH_STATE`/`NETWATCH_DASH_GWCSV`/
-`NETWATCH_DASH_CONFIG` pointed at fixtures and a random loopback port, because a
-native step is **not** sandboxed — `$HOME` on that machine holds live alerting
-state. `buildkite-agent pipeline upload` can *add* that step, but it cannot
-re-provision an existing one, so running the payload *build* natively means
-editing a genproj-owned file. That is recorded as a trap in
-`docs/genproj-target-gap.md` rather than done quietly.
+| Step | Host | Runs |
+| ---- | ---- | ---- |
+| `build` | native macOS, queue `mac-studio-linux` | `python -m build` → uploads `dist/**` |
+| `smoke_aarch64_apple_darwin` | native macOS, same queue | downloads `dist/**`, `bash scripts/smoke-launch.sh dist` |
+| `release` | `python:3.13-slim` container, `linux/arm64` | downloads `dist/**`, `release-artifacts.sh`, `gh release create` |
+
+Both the build and smoke steps carry `RELEASE_TARGET`, and the release step
+`depends_on` the smoke gate.
+
+The release step stays containerised by design: it only downloads artifacts and
+calls `gh`, so it needs no macOS toolchain and its `apt-get` bootstrap remains
+valid. The smoke step is native *because* it has to be — a Mach-O binary cannot
+run in the Linux container the docker plugin would provide, which is exactly why
+the containerised release step fetches artifacts through the agent API instead of
+`buildkite-agent artifact download`.
+
+One consequence worth stating: the build step's commands run on the Mac host
+*outside* any container, so `python -m pip install -e ".[dev]"` installs the
+project into the agent's own python (Homebrew 3.14 on mac-studio). That is
+genproj's generated step, not something this project chose.
 
 ## Open
 
@@ -197,3 +269,5 @@ editing a genproj-owned file. That is recorded as a trap in
   decision rather than a follow-up (memo v3 §6.1).
 - **`/healthz` does not read `build-info.json` yet** — the FastAPI app does not
   exist. The file is written and its shape is fixed by what `/healthz` owes.
+  `bin/netwatch-dash --version` / `--help` are answered today (that is what the
+  smoke gate probes); the app's own behaviour is not implemented.
