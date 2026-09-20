@@ -63,3 +63,98 @@ One payload carries both producers and the dashboard; CI tests the pair. But:
 
 1. **Producer/consumer integration-test depth.** Fixture round-trip (now) → producer-emits / parser-parses in CI (Phase 1) → a **shared schema module** imported by both (follow-up; implies the producers run in the bundled Python env, which is a behaviour change to the alerting path and must be decided deliberately).
 2. **Orbi panel privacy** (v2 §14.4) — surface `internet_text`/satellites/devices, or omit. Still open.
+
+---
+
+## 7. Correction (2026-09-20, later): CI **can** build and run a macOS payload
+
+v2 §10.2 claimed the assembled payload *"cannot be executed in CI (macOS binaries
+on a Linux runner), so the first real run of it is on the host."* **That is
+wrong as stated**, and the price it described does not have to be paid.
+
+**The agent is already native macOS.** Checked against the Buildkite API:
+
+```
+name:        mac-studio-1 / mac-studio-2
+user_agent:  buildkite-agent/4.0.3.14354 (darwin; arm64)
+os_id:       osx_26.6.2
+meta_data:   queue=mac-studio-linux
+```
+
+It runs natively from Homebrew (`/opt/homebrew/bin/buildkite-agent`, as `nick`).
+The queue is only *named* `mac-studio-linux`, and the queue's own description
+says what it is: **"Mac Studio self-hosted Docker agent (native arm64,
+OrbStack)"** — a native macOS host that runs *steps* inside Linux containers.
+
+That is the entire reason a macOS binary cannot execute: every step in
+`.buildkite/pipeline.yml` carries
+
+```yaml
+plugins:
+  - docker#v5.13.0:
+      image: "python:3.13-slim"
+      platform: linux/arm64
+```
+
+**Drop the docker plugin from a step and it runs natively on arm64 macOS.** No
+new agent, no queue to provision, no metered fleet (the cluster's `macos-*`
+queues are Buildkite's hosted product, which the `buildkite` capability exists
+to avoid — and they are not the machine we deploy to).
+
+**§8.4 still stands, on its own terms.** It correctly dissolved the *build
+matrix* problem (no targets ⇒ one build unit ⇒ no macOS runner needed for
+cross-target builds). It was never a claim that macOS execution is impossible.
+The two findings are independent, and only §10.2 was wrong.
+
+### What improves
+
+- **The fragile half of §10.2 disappears.** `pip install --platform
+  macosx_11_0_arm64 --only-binary=:all:` exists only because the build ran on
+  Linux. On a native arm64 macOS step a normal install resolves arm64 *macOS*
+  wheels, with no cross-install to get wrong.
+- **The payload gets a real gate.** Unpack `release/netwatch-dash-any.tar.gz`,
+  run `bin/netwatch-dash --version`, start it, curl `/healthz` — on the exact
+  artifact, before it is published. This is the tangible form of D1: producer
+  and consumer exercised together, on the platform that runs them.
+
+### What must be handled, not hand-waved
+
+1. **A native step is not sandboxed.** Its `HOME` is `/Users/nick`, which holds
+   `~/netwatch/gateway_rtt.csv`, `~/.local/state/netwatch/.rtt_streak` and
+   `~/.config/netwatch/config` — live alerting state. The containerised steps are
+   insulated from this; a native one is not. The smoke test must therefore run
+   with a temp `HOME` and the app's own overrides (`NETWATCH_DASH_STATE`,
+   `NETWATCH_DASH_GWCSV`, `NETWATCH_DASH_CONFIG`) pointed at fixtures, on a
+   random loopback port so it cannot collide with the real service on 8791.
+   Precondition, not follow-up.
+2. **`.buildkite/pipeline.yml` is genproj-owned and rewritten on regeneration.**
+   There is no knob for a second, differently-provisioned step: `buildkite.queue`
+   is a single string for the whole pipeline, and `github-release.targets` (a)
+   controls only the build matrix and (b) is refused for a non-rust language.
+   So the durable route is an app-owned script issuing `buildkite-agent pipeline
+   upload` with the macOS step — `scripts/` is seeded once and never overwritten.
+   Hand-editing works but dies at the next regeneration.
+
+### `any` clarified (this was right, and worth stating exactly)
+
+v2 §10.2's claim that the single artifact is keyed `any` is **confirmed in the
+generator source** (`src/generator/target-labels.js`):
+
+```
+export const UNIVERSAL_TARGET = "any";
+```
+
+> an artifact that is not architecture-specific (a Node bundle, a pure-python
+> `.pyz`) publishes under this key rather than claiming a triple
+
+with `targetCandidates()` appending it **last** for every host, and
+`validateFetchLaunch` stating: *"A node or python project is allowed: its release
+publishes one architecture-independent asset under the universal key, which the
+launcher's candidate list already falls back to."*
+
+The distinction that matters: **`any` is not a target you declare.** Putting it
+in `github-release.targets` fails the config enum; declaring any real target on a
+Python project fails `validateReleaseTargets` (*"A '{language}' project's output
+is architecture independent, so it ships as one asset under the universal key
+instead"*). Omitting `targets` is what yields the `any`-keyed asset. Python gets
+`any` by **default**, not by declaration.
