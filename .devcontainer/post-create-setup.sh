@@ -114,13 +114,6 @@ if command -v doppler &> /dev/null && doppler whoami &> /dev/null 2>&1; then
     fi
 fi
 
-
-
-echo "INFO: Installing Cursor CLI..."
-curl https://cursor.com/install -fsS | bash
-
-
-
 # Setup python virtual environment and install dependencies
 # (memo: genproj python devcontainer .venv PATH). postCreate runs with the
 # workspace as CWD, but cd explicitly so this also works when invoked from
