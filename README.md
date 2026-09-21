@@ -16,7 +16,7 @@ This project includes the following capabilities:
 - **GitHub Releases**: Publishes a GitHub Release with attached artifacts when a version is cut. The release step lives in the Buildkite pipeline, so it runs only after build and test passed on that commit: the version is bumped from the last tag, the tag is created by CI, the artifacts named by the project's own scripts/release-artifacts.sh are attached, and the release is published with generated notes. No version bookkeeping, and no PAT for a human to paste in.
 - **Fetch and Launch**: Seeds scripts/fetch-launch.sh: a launcher that fetches the newest release for the host, verifies its sha256 against the release manifest, unpacks it and execs it. Fail-open by design - a host never fails to boot because GitHub was unreachable. It consumes the per-target artifacts github-release publishes, so the two are selected together.
 - **Dependabot**: Configures Dependabot for automated dependency updates.
-- **AI Coding Agents**: Sets up the AI coding agents in the devcontainer: goose (config, MCP servers and spec-first recipes) plus the Cursor and Antigravity CLIs.
+- **AI Coding Agents**: Sets up the AI coding agents in the devcontainer: goose (config, MCP servers and spec-first recipes) plus the Antigravity CLI.
 - **Container Agent**: Every generated devcontainer brings up and registers its own a2a-goose agent (`<repo>-dev`), reached over the tailnet by the LiteLLM proxy; reuses the a2a-goose GitHub release channel, so the container has the same self-update path as a host.
 
 ## Setup
