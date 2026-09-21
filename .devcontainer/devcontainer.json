@@ -1,6 +1,8 @@
 {
-  "name": "Python",
+  "name": "netwatch-dash",
   "runArgs": [
+    "--name",
+    "netwatch-dash-devcontainer",
     "--sysctl",
     "net.ipv6.conf.all.disable_ipv6=1",
     "--cap-add=NET_ADMIN",
