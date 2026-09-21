@@ -149,7 +149,11 @@ an empty chart over a full file.
   reading all of it is the honest seed; an explicit byte bound is still honoured
   for a caller that wants one. The history is reported per minute for the newest
   six hours and folded to hourly buckets beyond, each row carrying `bucket_s`, so
-  a three-day window costs ~430 points per target rather than ~4,300.
+  a three-day window costs ~430 points per target rather than ~4,300. The window
+  carries `tail_bytes` (the seed bound; 0 = whole file) beside `truncated`
+  (which describes the last *read*, and so is true of every incremental read),
+  because a panel has to say *why* its left edge is where it is: the file begins
+  earlier than the chart, or the seed was bounded.
 - **`events.jsonl` is read as a bounded tail** (`events.py`, 1 MiB default).
   Cheap enough per request, but not unbounded, and the bounded read *also*
   sidesteps the rotation gap: there is no persisted offset to invalidate, so a

@@ -218,6 +218,12 @@ class Rollup:
     samples: int = 0
     window_bytes: int = 0
     truncated: bool = False
+    # The configured seed bound, 0 meaning the whole file. `truncated` describes
+    # the *last read* (an incremental read always starts at an offset, so it is
+    # true after the first refresh and says nothing about the seed); this is the
+    # setting the seed actually used, which is what a panel needs to say whether
+    # the history it holds starts at the file's first sample or at a byte bound.
+    tail_bytes: int | None = None
     first_unixtime: float | None = None
     last_unixtime: float | None = None
     seeded: bool = False
@@ -370,6 +376,7 @@ class Rollup:
             "bytes_read": self.bytes_read,
             "window_bytes": self.window_bytes,
             "truncated": self.truncated,
+            "tail_bytes": self.tail_bytes,
             "first_unixtime": self.first_unixtime,
             "last_unixtime": self.last_unixtime,
             "minutes": len(self.minutes),
@@ -519,6 +526,7 @@ def read(
     rollup = rollup if rollup is not None else Rollup(path=path)
     rollup.path = path
     rollup.error = None
+    rollup.tail_bytes = initial_tail_bytes
     # Per-read, not sticky: "restarted" and "truncated" describe what this pass
     # did, and a value left over from the seed would make every later read claim
     # to have re-seeded.
@@ -559,6 +567,7 @@ def read(
             # files together under one timeline, which is exactly the misalignment
             # §1 exists to prevent.
             rollup = Rollup(path=path)
+        rollup.tail_bytes = initial_tail_bytes
         cursor.offset = (
             max(0, stat.st_size - initial_tail_bytes) if initial_tail_bytes > 0 else 0
         )

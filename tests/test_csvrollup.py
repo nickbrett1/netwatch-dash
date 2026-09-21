@@ -541,7 +541,11 @@ def test_the_seed_reads_the_whole_file_unless_a_bound_is_given(tmp_path):
     assert whole.window()["truncated"] is False
     assert whole.window()["window_bytes"] == path.stat().st_size
     assert whole.latest_of("net")["minute"] == base + 3999
-
+    # `tail_bytes` is the setting the seed used, which is what a panel needs:
+    # `truncated` describes the last *read* and is true of every incremental
+    # read, so it cannot say whether the history starts at the file's first
+    # sample or at a byte bound.
+    assert whole.window()["tail_bytes"] == csvrollup.WHOLE_FILE
     bounded = csvrollup.read(
         path,
         csvrollup.Cursor(),
@@ -552,6 +556,7 @@ def test_the_seed_reads_the_whole_file_unless_a_bound_is_given(tmp_path):
     )
     assert bounded.window()["truncated"] is True
     assert bounded.window()["window_bytes"] == 4096
+    assert bounded.window()["tail_bytes"] == 4096
     assert bounded.samples < whole.samples
 
 

@@ -339,6 +339,7 @@ function rttChart(localise) {
   const w = localise.window || {};
   const excess = (localise.thresholds || {}).rtt_excess_ms;
   const span = `${clockLabel(x0, dayScale)} – ${clockLabel(x1, dayScale)}`;
+  const coverage = coverageNote(x0, w);
   note.textContent = `${span} · ${ys.length} samples` +
     (coarsest > 60
       ? ` · recent points are per minute, older ones ${Math.round(coarsest / 3600)} h averages`
@@ -348,7 +349,25 @@ function rttChart(localise) {
       : ` · fault is the path sitting ≥ ${fmt(excess, 0)} ms above its own gateway line`
         + (warn ? `, or the whole path above ${fmt(warn, 0)} ms` : "")) +
     (clipped ? ` · ${clipped} sample(s) above ${ymax.toFixed(0)} ms drawn at the top edge` : "") +
-    (w.truncated ? " · window is a bounded tail, older minutes are not loaded" : "");
+    coverage +
+    (w.error ? ` · the csv could not be read: ${w.error}` : "");
+}
+
+// Why the chart's left edge is where it is. `w.truncated` is about the last
+// *read* — an incremental read always starts at an offset, so it is true after
+// the first refresh and would blame a bounded tail that no longer exists. What
+// bounds the history now is the retention window, so say that: the file begins
+// earlier than the chart, or it does not.
+function coverageNote(x0, w) {
+  const fileStart = w.first_unixtime;
+  if (fileStart == null) return "";
+  if (x0 * 60 > fileStart + 120)
+    return ` · the file begins ${clockLabel(Math.floor(fileStart / 60), true)};`
+      + " older minutes are outside the retention window";
+  if ((w.tail_bytes || 0) > 0)
+    return ` · seeded from a ${Math.round(w.tail_bytes / 1048576)} MiB tail, so older`
+      + " minutes were never read";
+  return "";
 }
 
 function lossChart(localise) {
