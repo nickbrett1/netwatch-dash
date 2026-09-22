@@ -392,17 +392,26 @@ function lossChart(localise) {
       stroke: "#23262f" }));
     for (const p of d.pts) {
       samples++;
-      // Either a failed probe (n - measured) or a shed packet is loss worth drawing.
-      const lost = (p.loss || 0) + Math.max(0, (p.n || 0) - (p.measured || 0));
-      if (!lost && !p.loss_pct) continue;
+      // One source of truth per row. `loss` is the count of probes that got no
+      // reply and `loss_pct` is that same fraction as a percentage. `measured`
+      // is `n - loss` by construction, so deriving a second "lost" from
+      // `n - measured` added loss to itself: every bar was drawn twice as tall
+      // as its own tooltip percentage, and the count printed beside that
+      // percentage said double the truth.
+      const lost = p.loss || 0;
+      const pct = p.loss_pct || 0;
+      if (!lost && !pct) continue;
       anyLoss = true;
-      const pct = Math.max(p.loss_pct || 0, (lost / Math.max(1, p.n)) * 100);
-      const h = Math.max(2, Math.min(laneH - 10, pct));
+      // Height is the lost-probe share, linear across the lane: full height is
+      // 100% loss. The 3 px floor is what keeps one lost probe in a minute from
+      // rounding away to an invisible sub-pixel — the height reads magnitude,
+      // the hover reads the exact count.
+      const h = Math.max(3, Math.min(laneH - 10, (pct / 100) * (laneH - 10)));
       const r = ns("rect", { x: px(p.x).toFixed(1), y: base - h,
                              width: barW(p).toFixed(1), height: h, fill: "#ff6b6b" });
       const title = ns("title", {});
       title.textContent = `${d.t} ${new Date(p.x * 60000).toLocaleString()} — ` +
-        `${lost}/${p.n} probes lost (${(p.loss_pct || 0).toFixed(1)}%)` +
+        `${lost}/${p.n} probes lost (${pct.toFixed(1)}%)` +
         ((p.bucket_s || 60) > 60 ? ` over ${Math.round(p.bucket_s / 3600)} h` : "");
       r.appendChild(title);
       svg.appendChild(r);
@@ -411,7 +420,9 @@ function lossChart(localise) {
   const note = document.getElementById("loss-note");
   note.textContent = anyLoss
     ? "each bar is a span with at least one lost probe — a minute near the right, "
-      + "an hour further left; hover for the count"
+      + "an hour further left; bar height is the share of that span's probes that "
+      + "went unanswered, floored at 3 px so a single loss stays visible; hover for "
+      + "the count"
     : `no loss recorded in ${samples} sampled spans — the bars are absent because ` +
       `the counts are zero, not because the chart failed`;
 }

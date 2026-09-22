@@ -139,6 +139,27 @@ def test_loss_is_not_averaged_in_as_zero_latency(tmp_path):
     assert minute["rtt_ms_avg"] == 4.0  # over the two that were measured
 
 
+def test_the_loss_panel_reads_loss_once_not_twice(tmp_path):
+    """The drill-in's loss bar takes its height from `loss_pct` and prints `loss`
+    as the count beside it — one quantity, read two ways.
+
+    `measured` is `n - loss` by construction, so a row where `loss_pct` disagrees
+    with `loss / n`, or where `measured` is anything but `n - loss`, would let the
+    bar's height contradict its own hover text. That is exactly the bug this
+    guards: the chart summed `loss` with `n - measured` (which *is* `loss`), so
+    every bar drew at twice the percentage it claimed. Pinning the two readings
+    together here means the panel can trust either one.
+    """
+    text = "ts_iso,unixtime,target,rtt_ms\n" + "".join(
+        f"2026-09-17T12:59:4{i}.000,{1789664386 + i}.0,gw,{'' if i < 3 else '4.0'}\n"
+        for i in range(5)
+    )
+    row = read_once(tmp_path, text).series("gw")[0]
+
+    assert row["measured"] == row["n"] - row["loss"]
+    assert row["loss_pct"] == 100 * row["loss"] / row["n"] == 60.0
+
+
 def test_an_appended_partial_line_is_held_until_it_is_complete(tmp_path):
     """The producer appends to a file this reads; half a line is normal."""
     path = tmp_path / "gw.csv"

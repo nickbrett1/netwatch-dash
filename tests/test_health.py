@@ -254,3 +254,18 @@ def test_the_landing_page_is_the_drill_in(tmp_path):
     # Bandwidth is a single number on the tile; the daily runs behind it are the
     # other half of "drill in", and live behind a different endpoint.
     assert "/api/speed" in response.text
+
+
+def test_the_landing_loss_chart_does_not_count_loss_twice(tmp_path):
+    """Regression, in the page itself: `n - measured` *is* `loss`, so a bar that
+    added the two drew at twice its own tooltip percentage. The chart has no JS
+    test harness, so this pins the one arithmetic that went wrong rather than the
+    layout around it.
+    """
+    write_build_info(tmp_path)
+    client = TestClient(create_app(make_settings(tmp_path)))
+
+    html = client.get("/").text
+
+    assert "(p.n || 0) - (p.measured || 0)" not in html
+    assert "const lost = p.loss || 0;" in html
