@@ -104,8 +104,14 @@ LANDING_HTML = """<!doctype html>
     <p class="muted small" id="chart-note"></p>
   </section>
   <section>
-    <h2>Loss</h2>
-    <svg id="loss" viewBox="0 0 1000 150" preserveAspectRatio="none"></svg>
+    <h2>Loss — probes that got no reply</h2>
+    <p class="muted small" style="margin:0 0 8px">
+      <span class="swatch" style="background:#ff6b6b;display:inline-block;
+        vertical-align:middle;margin-right:6px"></span>each bar marks a span where
+      at least one probe went unanswered; its height is the share of that span's
+      probes lost, full height being 100%
+    </p>
+    <svg id="loss" viewBox="0 0 1000 170" preserveAspectRatio="none"></svg>
     <p class="muted small" id="loss-note"></p>
   </section>
   <section>
@@ -373,22 +379,54 @@ function coverageNote(x0, w) {
 function lossChart(localise) {
   const svg = document.getElementById("loss");
   const targets = localise.targets || {};
-  const laneH = 30, top = 8;
+  const laneH = 30, top = 10;
+  // A fixed left gutter holds the lane labels, so every lane's baseline starts at
+  // the same x. They used to be drawn over the plot at different text lengths,
+  // which made the axis look like it began in four different places.
+  const LX = 150, RX = 980, plotW = RX - LX;
   let samples = 0, anyLoss = false;
   const all = TARGETS.map(t => ({ t, pts: series(targets, t) })).filter(d => d.pts.length);
+  const note = document.getElementById("loss-note");
+  if (!all.length) {
+    // Nothing to place on a time axis: say so rather than draw an empty frame.
+    text(svg, 10, 24, "no samples in the window");
+    note.textContent = "the rollup has read nothing yet — this is not an empty network";
+    return;
+  }
   const xs = all.flatMap(d => d.pts.map(p => p.x));
   const x0 = Math.min(...xs), x1 = Math.max(...xs);
-  const px = x => 44 + (x - x0) / Math.max(1, x1 - x0) * 936;
+  // Clock times inside a day, dates once the window spans one — the same rule as
+  // the RTT chart, so the two panels agree about when "left" is.
+  const dayScale = (x1 - x0) > 24 * 60;
+  const span = Math.max(1, x1 - x0);
+  const px = x => LX + ((x - x0) / span) * plotW;
   // A bar is as wide as the span it stands for, so an hourly row draws an hourly
   // bar rather than a one-pixel tick indistinguishable from a lost sample.
-  const span = Math.max(1, x1 - x0);
-  const barW = p => Math.max(1, ((p.bucket_s || 60) / span) * 936);
+  // `bucket_s` is seconds and `span` is minutes, so it has to be divided by 60
+  // first — without that every bar was sixty times too wide, which a long window
+  // made look plausible and a short one made into a solid block.
+  const barW = p => Math.max(2, ((p.bucket_s || 60) / 60 / span) * plotW);
+  const bottom = top + all.length * laneH - 8;
+
+  // The time axis the lanes sit on: both ends of the window in words, plus the
+  // gridlines that carry them up through the lanes, so a lone bar can be read as
+  // "when" instead of just "somewhere left".
+  text(svg, LX, bottom + 20, clockLabel(x0, dayScale),
+       { "font-size": 10, fill: "#6b7280" });
+  text(svg, RX, bottom + 20, clockLabel(x1, dayScale),
+       { "text-anchor": "end", "font-size": 10, fill: "#6b7280" });
+  for (const gx of [LX, RX]) {
+    svg.appendChild(ns("line", { x1: gx, y1: top - 2, x2: gx, y2: bottom,
+      stroke: "#23262f", "stroke-dasharray": "3 5" }));
+  }
 
   all.forEach((d, i) => {
     const base = top + i * laneH + laneH - 8;
-    text(svg, 6, base - 2, d.t, { fill: COLORS[d.t] });
-    text(svg, 20, base - 2, (TARGET_META[d.t] || {}).host || "", { "font-size": 9 });
-    svg.appendChild(ns("line", { x1: 44, y1: base, x2: 980, y2: base,
+    // The lane label lives in the gutter, naming the row: which hop, and what
+    // watching it tells you.
+    text(svg, 8, base - 11, d.t, { fill: COLORS[d.t], "font-weight": 600 });
+    text(svg, 8, base + 4, (TARGET_META[d.t] || {}).host || "", { "font-size": 10 });
+    svg.appendChild(ns("line", { x1: LX, y1: base, x2: RX, y2: base,
       stroke: "#23262f" }));
     for (const p of d.pts) {
       samples++;
@@ -417,12 +455,10 @@ function lossChart(localise) {
       svg.appendChild(r);
     }
   });
-  const note = document.getElementById("loss-note");
   note.textContent = anyLoss
-    ? "each bar is a span with at least one lost probe — a minute near the right, "
-      + "an hour further left; bar height is the share of that span's probes that "
-      + "went unanswered, floored at 3 px so a single loss stays visible; hover for "
-      + "the count"
+    ? "a bar is a span where at least one probe went unanswered; its height is the "
+      + "share of that span's probes lost (full height is 100%), floored at 3 px so "
+      + "a single loss stays visible — hover for the count"
     : `no loss recorded in ${samples} sampled spans — the bars are absent because ` +
       `the counts are zero, not because the chart failed`;
 }
