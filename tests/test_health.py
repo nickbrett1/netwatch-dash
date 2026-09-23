@@ -250,22 +250,43 @@ def test_the_landing_page_is_the_drill_in(tmp_path):
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
     assert "netwatch-dash" in response.text
-    assert "/api/localise" in response.text  # the history it draws
+    assert "/api/localise" in response.text
     # Bandwidth is a single number on the tile; the daily runs behind it are the
     # other half of "drill in", and live behind a different endpoint.
     assert "/api/speed" in response.text
 
 
-def test_the_landing_loss_chart_does_not_count_loss_twice(tmp_path):
-    """Regression, in the page itself: `n - measured` *is* `loss`, so a bar that
-    added the two drew at twice its own tooltip percentage. The chart has no JS
-    test harness, so this pins the one arithmetic that went wrong rather than the
-    layout around it.
+def test_the_landing_page_no_longer_draws_the_unread_charts(tmp_path):
+    """The RTT and loss charts were removed: built, maintained, never read.
+
+    A test that pins the removal is what stops them drifting back in one panel
+    at a time. The bandwidth chart stays — it is the one that is looked at.
     """
     write_build_info(tmp_path)
     client = TestClient(create_app(make_settings(tmp_path)))
 
     html = client.get("/").text
 
-    assert "(p.n || 0) - (p.measured || 0)" not in html
-    assert "const lost = p.loss || 0;" in html
+    assert 'id="chart"' not in html  # the RTT series
+    assert 'id="loss"' not in html  # the loss bars
+    assert "en0 since boot" not in html  # never said anything actionable
+    assert 'id="speed"' in html  # kept
+
+
+def test_every_tile_can_explain_its_own_thresholds(tmp_path):
+    """Colour without a reason is the failure mode the modal exists to prevent.
+
+    Each tile's metric has an entry in INFO, and the click handler is wired to
+    the same class the tiles are given — so a tile that is coloured can always be
+    opened to see the rule and whether the threshold is set.
+    """
+    write_build_info(tmp_path)
+    client = TestClient(create_app(make_settings(tmp_path)))
+
+    html = client.get("/").text
+
+    for metric in ("forwarded", "gateway", "loss", "link", "down", "up", "en0", "peer"):
+        assert f"  {metric}: {{ title:" in html
+    assert 'closest(".fact.link")' in html
+    # The upload threshold is quoted in the Up tile's definition like the rest.
+    assert "ul_warn_mbps:" in html

@@ -1,25 +1,25 @@
-"""The landing page: a drill-in that shows the history the tile only summarises.
+"""The landing page: a drill-in that shows the numbers behind the tile.
 
-The homepage tile answers "is it OK *now*" with five numbers. This page is what
-clicking it opens: the same verdict, the numbers behind it, and the history of
-the path -- per minute for the recent hours, hourly further back, the way the
-bandwidth panel reaches back weeks -- all from endpoints the app already serves
-(`/api/summary`, `/api/localise`, `/api/speed`), so the page costs three fetches
-and no second parse of the csv.
+The homepage tile answers "is it OK *now*" with a verdict; this page is what
+clicking it opens: the same verdict, the numbers behind it, and the daily
+bandwidth runs. It reads the endpoints the app already serves (`/api/summary`,
+`/api/localise`, `/api/speed`) rather than re-deriving anything.
 
 It is a single self-contained document: inline CSS and JS, no CDN, no build step,
 no template engine. The dashboard must render on a host with no network access
 beyond its own tailnet, so anything it needs has to come from the app itself.
 
-Two rendering rules this page keeps, both learned from the data contract:
+Two rules this page keeps:
 
-* **An empty chart is not evidence of nothing.** Loss really is 0% across the
-  window, so the loss chart has no bars to draw -- which looks identical to a
-  broken chart. It says "no loss recorded" instead, and prints the sample count
-  it is claiming that over.
-* **A chart says what it is not showing.** The RTT series is clipped at the 98th
-  percentile so that one gateway spike cannot flatten everything else onto the
-  axis; when it clips, it says so and by how much.
+* **Every number is coloured by the status rule, and explains itself.** Each
+  tile takes its good/warn/crit colour from the same inputs the pill is derived
+  from (schema §7), so a tile and the verdict cannot disagree; clicking a tile
+  opens its definition and the thresholds actually in force, including "not set".
+* **A number with nothing to judge it against is uncoloured, not green.** No
+  threshold means no comparison — never a comparison against zero.
+
+The RTT and loss charts were removed after the fact: they were built and
+maintained but not read, and an unread chart is a liability, not a feature.
 """
 
 from __future__ import annotations
@@ -69,10 +69,6 @@ LANDING_HTML = """<!doctype html>
   .fact.link { cursor: help; }
   .fact.link:hover { border-color: #3b4152; background: #131722; }
   .fact .k::after { content: " ⓘ"; color: #4b5563; font-size: 11px; }
-  .legend.col { display: grid; gap: 4px 18px;
-                grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
-  .legend.col .key { align-items: baseline; }
-  .legend.col b { font-family: ui-monospace, Menlo, monospace; }
   #modal { position: fixed; inset: 0; background: #05070bd9; display: none;
            align-items: center; justify-content: center; padding: 20px; z-index: 10; }
   #modal.open { display: flex; }
@@ -98,23 +94,6 @@ LANDING_HTML = """<!doctype html>
     <div class="facts" id="facts"><span class="muted small">loading…</span></div>
   </section>
   <section>
-    <h2>Round-trip time (ms) — per minute, hourly further back</h2>
-    <div class="legend" id="legend"></div>
-    <svg id="chart" viewBox="0 0 1000 260" preserveAspectRatio="none"></svg>
-    <p class="muted small" id="chart-note"></p>
-  </section>
-  <section>
-    <h2>Loss — probes that got no reply</h2>
-    <p class="muted small" style="margin:0 0 8px">
-      <span class="swatch" style="background:#ff6b6b;display:inline-block;
-        vertical-align:middle;margin-right:6px"></span>each bar marks a span where
-      at least one probe went unanswered; its height is the share of that span's
-      probes lost, full height being 100%
-    </p>
-    <svg id="loss" viewBox="0 0 1000 170" preserveAspectRatio="none"></svg>
-    <p class="muted small" id="loss-note"></p>
-  </section>
-  <section>
     <h2>Daily bandwidth checks (Mbps)</h2>
     <div class="legend" id="speed-legend"></div>
     <svg id="speed" viewBox="0 0 1000 240" preserveAspectRatio="none"></svg>
@@ -122,17 +101,6 @@ LANDING_HTML = """<!doctype html>
   </section>
 </main>
 <script>
-const COLORS = { net: "#5ee08a", wire: "#63b3ed", gw: "#f0c14b", wl: "#c084fc" };
-const TARGETS = ["net", "wire", "gw", "wl"];
-// Which host each series is, and what watching it tells you. The letters alone
-// are not self-explanatory, and the legend is where that has to be fixed.
-const TARGET_META = {
-  net:  { host: "1.1.1.1",     what: "forwarded path — beyond the router" },
-  wire: { host: "192.168.1.2", what: "wired peer — far end of the LAN link" },
-  gw:   { host: "192.168.1.1", what: "the router itself" },
-  wl:   { host: "192.168.1.14", what: "wireless peer — over Wi-Fi" },
-};
-
 // Long-form definitions, on demand. They are here rather than on the page
 // because they are reference material: needed once, then noise.
 const INFO = {
@@ -153,17 +121,33 @@ const INFO = {
       "ICMP handling, not a fault on the path, so it never moves the status " +
       "(RTT_ALERT is off on this host)." },
   loss: { title: "Path loss",
-    body: "The share of probes in the window that got no reply, read from the " +
-      "probe log rather than the ping stream, and reported per minute for the " +
-      "recent window — an hour per bar further back. A span in which nothing " +
-      "replied counts as 100% loss for that span. Loss is worth " +
-      "watching beside RTT because it is the signal that survives a link that is " +
-      "saturated rather than broken." },
+    body: "The share of the newest probe's pings that got no reply, read from " +
+      "the probe log. Loss is the one signal trusted across every path " +
+      "(schema §7) — it is what survives a link that is saturated rather than " +
+      "broken — so any loss at all colours this red and moves the status to " +
+      "critical. The gateway's own ICMP replies are the one place a lone drop is " +
+      "routine; everywhere else, expect zero." },
+  link: { title: "Link rate",
+    body: "The negotiated rate of the LAN interface, from the newest probe's " +
+      "media and any # link_change markers. Expected is 1000baseT full-duplex. " +
+      "Anything else — a renegotiation down to 100 Mbit, or half-duplex — counts " +
+      "as critical, because it is usually a bad cable or a bad port and it caps " +
+      "every other number on this page. No media recorded reads as unknown, " +
+      "never as good." },
+  down: { title: "Download",
+    body: "The most recent daily speed test's download. Warn below " +
+      "{dl_warn_mbps}. Throughput is a health signal (schema §7) and only a " +
+      "*current* run counts: a days-old measurement is shown but never colours " +
+      "the status, because it is not evidence about the link now." },
+  up: { title: "Upload",
+    body: "The most recent daily speed test's upload. Warn below {ul_warn_mbps}. " +
+      "Same rule as download: a stale run is displayed but does not colour the " +
+      "status." },
   en0: { title: "en0 errors",
-    body: "Cumulative error counters for en0, the LAN interface, from the " +
-      "producer's # iferrs markers (netstat -ib): input errors + output errors + " +
-      "collisions. These are raw since-boot totals, not deltas — the dashboard " +
-      "derives the change between markers. Zero is the expected reading." },
+    body: "Error counters for the LAN interface — input errors + output errors + " +
+      "collisions, from the producer's # iferrs markers (netstat -ib). The " +
+      "dashboard reports the change across the csv window, not the raw since-boot " +
+      "total. Zero is the expected reading; any new error is treated as critical." },
   peer: { title: "Peer RTT",
     body: "Round-trip time to 192.168.1.2, the host at the far end of the wired " +
       "LAN link. Diagnostic: the data contract lists peer RTT and peer loss as " +
@@ -222,8 +206,16 @@ function facts(summary, localise) {
   const fault = ((localise || {}).reading || {}).fault;
   const over = fault === "beyond-router" || fault === "path-ceiling";
   const dww = si.dl_warn_mbps, uww = si.ul_warn_mbps;
-  const host = localise.host || {};
-  const errs = host.errors || {};
+
+  // Each colour is the status rule for that one tile, drawn from the same inputs
+  // the pill is derived from (schema §7), so "why is it that colour" has one
+  // answer. A tile with no threshold to judge against stays uncoloured: unknown
+  // is not good, and it is not amber either.
+  const pathCls = excessLimit == null && warn == null ? "" : (over ? "over" : "good");
+  const lossCls = si.loss_pct == null ? "" : (si.loss_pct > 0 ? "bad" : "good");
+  const linkCls = si.link_ok === true ? "good" : si.link_ok === false ? "bad" : "";
+  const thrCls = (v, w) => (v == null || w == null ? "" : v < w ? "over" : "good");
+  const en0Cls = si.en0_errors == null ? "" : (si.en0_errors > 0 ? "bad" : "good");
 
   const pathHint = fault === "beyond-router"
     ? `beyond the router by ≥ ${fmt(excessLimit, 1)} ms`
@@ -235,233 +227,35 @@ function facts(summary, localise) {
 
   const tiles = [
     fact("Forwarded path RTT", fmt(si.forwarded_rtt_ms, 1) + " ms",
-         pathHint, over ? "over" : "", "forwarded"),
-    fact("Gateway RTT", fmt(si.gw_rtt_ms, 1) + " ms", "the router itself", "", "gateway"),
+         pathHint, pathCls, "forwarded"),
+    // Diagnostic only (schema §7): the router's own ICMP never moves the status,
+    // so it is never coloured. Any brightness here is the router's CPU, not a
+    // fault on the path.
+    fact("Gateway RTT", fmt(si.gw_rtt_ms, 1) + " ms",
+         "diagnostic — never moves the status", "", "gateway"),
     fact("Path loss", fmt(si.loss_pct, 2) + " %",
-         si.probe_age_s == null ? "" : `probe ${Math.round(si.probe_age_s)}s old`, "", "loss"),
-    fact("Link", si.link_ok ? "up" : "down",
-         (localise.host && localise.host.iface) || "", si.link_ok ? "good" : "bad"),
+         si.loss_pct == null ? "no probe yet"
+           : si.loss_pct > 0 ? "any loss is critical" : "none on the newest probe",
+         lossCls, "loss"),
+    fact("Link", si.link_ok == null ? "unknown" : (si.link_ok ? "up" : "down"),
+         (localise.host && localise.host.iface) || "expected 1000baseT",
+         linkCls, "link"),
     fact("Down", fmt(si.dl_mbps, 1) + " Mbps",
-         dww == null ? "" : `warn ≤ ${fmt(dww, 0)}`,
-         dww != null && si.dl_mbps != null && si.dl_mbps < dww ? "over" : ""),
+         dww == null ? "no threshold set" : `warn below ${fmt(dww, 0)}`,
+         thrCls(si.dl_mbps, dww), "down"),
     fact("Up", fmt(si.ul_mbps, 1) + " Mbps",
-         uww == null ? "" : `warn ≤ ${fmt(uww, 0)}`,
-         uww != null && si.ul_mbps != null && si.ul_mbps < uww ? "over" : ""),
+         uww == null ? "no threshold set" : `warn below ${fmt(uww, 0)}`,
+         thrCls(si.ul_mbps, uww), "up"),
     fact("en0 errors", String(si.en0_errors == null ? "–" : si.en0_errors),
-         si.en0_errors == null ? "no # iferrs in window" : "ierrs+oerrs+coll", "", "en0"),
-    fact("Peer", fmt((localise.peer || {}).peer_ms, 1) + " ms",
-         (localise.peer || {}).peer || "", "", "peer"),
+         si.en0_errors == null ? "no # iferrs in window" : "ierrs+oerrs+coll; zero expected",
+         en0Cls, "en0"),
+    fact("Peer RTT", fmt((localise.peer || {}).peer_ms, 1) + " ms",
+         (localise.peer || {}).peer || "no threshold set", "", "peer"),
   ];
-  if (errs.rx_bytes != null) {
-    tiles.push(fact("en0 since boot",
-      (errs.rx_bytes / 1e9).toFixed(2) + " GB rx",
-      (errs.tx_bytes / 1e9).toFixed(2) + " GB tx"));
-  }
   return tiles.join("");
 }
 
-// ------------------------------------------------------------------ the charts
-
-function series(targets, target) {
-  const t = targets[target];
-  if (!t || !t.series) return [];
-  // `bucket_s` is 60 for a per-minute row and wider for the folded older ones.
-  // The charts draw the x axis as a plain number of minutes since the epoch, so
-  // a bucket row simply lands where it belongs; carrying the width lets a label
-  // or a tooltip say "this point is an hour" instead of implying a minute.
-  return t.series.map(m => ({ x: m.minute, y: m.rtt_ms_avg, n: m.n,
-                              measured: m.measured, loss: m.loss,
-                              loss_pct: m.loss_pct, bucket_s: m.bucket_s || 60 }));
-}
-
-// "14:05" for a window inside a day, "Sep 18 14:05" once it spans days — because
-// a two-ended time-of-day label on a three-day axis names the same clock twice.
-function clockLabel(minute, dayScale) {
-  const d = new Date(minute * 60000);
-  return dayScale
-    ? d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit",
-                             minute: "2-digit" })
-    : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-
-function rttChart(localise) {
-  const svg = document.getElementById("chart");
-  const targets = localise.targets || {};
-  const warn = (localise.thresholds || {}).rtt_warn_ms;
-  const data = TARGETS.map(t => ({ t, pts: series(targets, t).filter(p => p.y != null) }))
-                      .filter(d => d.pts.length);
-  const note = document.getElementById("chart-note");
-  if (!data.length) {
-    // "Nothing to draw" has two causes worth telling apart: the rollup has not
-    // read the csv yet, or it read it and no probe replied.
-    const read = TARGETS.some(t => ((targets[t] || {}).series || []).length);
-    text(svg, 10, 24, read ? "no RTT measured" : "no samples in the window");
-    note.textContent = read
-      ? "spans are present but no RTT was measured — every probe in the window was lost"
-      : "the rollup has read nothing yet — this is not an empty network";
-    return;
-  }
-  const xs = data.flatMap(d => d.pts.map(p => p.x));
-  const ys = data.flatMap(d => d.pts.map(p => p.y)).sort((a, b) => a - b);
-  const x0 = Math.min(...xs), x1 = Math.max(...xs);
-  // Past a day the axis is read in dates, not clock times: "13:00 – 13:00" is
-  // true of a three-day window and says nothing about how long it is.
-  const dayScale = (x1 - x0) > 24 * 60;
-  const coarsest = Math.max(...data.flatMap(d => d.pts.map(p => p.bucket_s || 60)));
-  const p98 = ys[Math.min(ys.length - 1, Math.floor(ys.length * 0.98))];
-  // One gateway spike should not flatten every other line onto the axis.
-  const ymax = Math.max(p98, warn ? warn * 1.2 : 0, 1);
-  const clipped = ys.filter(y => y > ymax).length;
-  const px = x => 44 + (x - x0) / Math.max(1, x1 - x0) * 936;
-  const py = y => 234 - Math.min(y, ymax) / ymax * 210;
-
-  svg.appendChild(ns("line", { x1: 44, y1: 234, x2: 980, y2: 234, stroke: "#23262f" }));
-  text(svg, 6, 26, ymax.toFixed(0) + " ms");
-  text(svg, 6, 236, "0");
-  // The two ends of the window, said in whatever unit the window is long in.
-  text(svg, 44, 252, clockLabel(x0, dayScale), { "font-size": 10, fill: "#6b7280" });
-  text(svg, 980, 252, clockLabel(x1, dayScale), { "text-anchor": "end",
-    "font-size": 10, fill: "#6b7280" });
-  if (warn) {
-    svg.appendChild(ns("line", { x1: 44, y1: py(warn), x2: 980, y2: py(warn),
-      stroke: "#f0c14b", "stroke-width": 1, "stroke-dasharray": "4 4",
-      opacity: 0.7 }));
-    text(svg, 984, py(warn) + 4, `ceiling ${fmt(warn, 0)}`, { "text-anchor": "end",
-      fill: "#f0c14b" });
-  }
-  const legend = document.getElementById("legend");
-  legend.innerHTML = "";
-  legend.className = "legend col";
-  for (const d of data) {
-    const pts = d.pts.map(p => `${px(p.x).toFixed(1)},${py(p.y).toFixed(1)}`).join(" ");
-    svg.appendChild(ns("polyline", { points: pts, fill: "none",
-      stroke: COLORS[d.t], "stroke-width": 1.5, "stroke-linejoin": "round" }));
-    const meta = TARGET_META[d.t] || { host: "", what: "" };
-    const sw = document.createElement("span"); sw.className = "key";
-    sw.innerHTML = `<span class="swatch" style="background:${COLORS[d.t]}"></span>` +
-      `<b>${d.t}</b> ${meta.host} <span class="muted">— ${meta.what}</span>`;
-    legend.appendChild(sw);
-  }
-  const w = localise.window || {};
-  const excess = (localise.thresholds || {}).rtt_excess_ms;
-  const span = `${clockLabel(x0, dayScale)} – ${clockLabel(x1, dayScale)}`;
-  const coverage = coverageNote(x0, w);
-  note.textContent = `${span} · ${ys.length} samples` +
-    (coarsest > 60
-      ? ` · recent points are per minute, older ones ${Math.round(coarsest / 3600)} h averages`
-      : "") +
-    (excess == null
-      ? ""
-      : ` · fault is the path sitting ≥ ${fmt(excess, 0)} ms above its own gateway line`
-        + (warn ? `, or the whole path above ${fmt(warn, 0)} ms` : "")) +
-    (clipped ? ` · ${clipped} sample(s) above ${ymax.toFixed(0)} ms drawn at the top edge` : "") +
-    coverage +
-    (w.error ? ` · the csv could not be read: ${w.error}` : "");
-}
-
-// Why the chart's left edge is where it is. `w.truncated` is about the last
-// *read* — an incremental read always starts at an offset, so it is true after
-// the first refresh and would blame a bounded tail that no longer exists. What
-// bounds the history now is the retention window, so say that: the file begins
-// earlier than the chart, or it does not.
-function coverageNote(x0, w) {
-  const fileStart = w.first_unixtime;
-  if (fileStart == null) return "";
-  if (x0 * 60 > fileStart + 120)
-    return ` · the file begins ${clockLabel(Math.floor(fileStart / 60), true)};`
-      + " older minutes are outside the retention window";
-  if ((w.tail_bytes || 0) > 0)
-    return ` · seeded from a ${Math.round(w.tail_bytes / 1048576)} MiB tail, so older`
-      + " minutes were never read";
-  return "";
-}
-
-function lossChart(localise) {
-  const svg = document.getElementById("loss");
-  const targets = localise.targets || {};
-  const laneH = 30, top = 10;
-  // A fixed left gutter holds the lane labels, so every lane's baseline starts at
-  // the same x. They used to be drawn over the plot at different text lengths,
-  // which made the axis look like it began in four different places.
-  const LX = 150, RX = 980, plotW = RX - LX;
-  let samples = 0, anyLoss = false;
-  const all = TARGETS.map(t => ({ t, pts: series(targets, t) })).filter(d => d.pts.length);
-  const note = document.getElementById("loss-note");
-  if (!all.length) {
-    // Nothing to place on a time axis: say so rather than draw an empty frame.
-    text(svg, 10, 24, "no samples in the window");
-    note.textContent = "the rollup has read nothing yet — this is not an empty network";
-    return;
-  }
-  const xs = all.flatMap(d => d.pts.map(p => p.x));
-  const x0 = Math.min(...xs), x1 = Math.max(...xs);
-  // Clock times inside a day, dates once the window spans one — the same rule as
-  // the RTT chart, so the two panels agree about when "left" is.
-  const dayScale = (x1 - x0) > 24 * 60;
-  const span = Math.max(1, x1 - x0);
-  const px = x => LX + ((x - x0) / span) * plotW;
-  // A bar is as wide as the span it stands for, so an hourly row draws an hourly
-  // bar rather than a one-pixel tick indistinguishable from a lost sample.
-  // `bucket_s` is seconds and `span` is minutes, so it has to be divided by 60
-  // first — without that every bar was sixty times too wide, which a long window
-  // made look plausible and a short one made into a solid block.
-  const barW = p => Math.max(2, ((p.bucket_s || 60) / 60 / span) * plotW);
-  const bottom = top + all.length * laneH - 8;
-
-  // The time axis the lanes sit on: both ends of the window in words, plus the
-  // gridlines that carry them up through the lanes, so a lone bar can be read as
-  // "when" instead of just "somewhere left".
-  text(svg, LX, bottom + 20, clockLabel(x0, dayScale),
-       { "font-size": 10, fill: "#6b7280" });
-  text(svg, RX, bottom + 20, clockLabel(x1, dayScale),
-       { "text-anchor": "end", "font-size": 10, fill: "#6b7280" });
-  for (const gx of [LX, RX]) {
-    svg.appendChild(ns("line", { x1: gx, y1: top - 2, x2: gx, y2: bottom,
-      stroke: "#23262f", "stroke-dasharray": "3 5" }));
-  }
-
-  all.forEach((d, i) => {
-    const base = top + i * laneH + laneH - 8;
-    // The lane label lives in the gutter, naming the row: which hop, and what
-    // watching it tells you.
-    text(svg, 8, base - 11, d.t, { fill: COLORS[d.t], "font-weight": 600 });
-    text(svg, 8, base + 4, (TARGET_META[d.t] || {}).host || "", { "font-size": 10 });
-    svg.appendChild(ns("line", { x1: LX, y1: base, x2: RX, y2: base,
-      stroke: "#23262f" }));
-    for (const p of d.pts) {
-      samples++;
-      // One source of truth per row. `loss` is the count of probes that got no
-      // reply and `loss_pct` is that same fraction as a percentage. `measured`
-      // is `n - loss` by construction, so deriving a second "lost" from
-      // `n - measured` added loss to itself: every bar was drawn twice as tall
-      // as its own tooltip percentage, and the count printed beside that
-      // percentage said double the truth.
-      const lost = p.loss || 0;
-      const pct = p.loss_pct || 0;
-      if (!lost && !pct) continue;
-      anyLoss = true;
-      // Height is the lost-probe share, linear across the lane: full height is
-      // 100% loss. The 3 px floor is what keeps one lost probe in a minute from
-      // rounding away to an invisible sub-pixel — the height reads magnitude,
-      // the hover reads the exact count.
-      const h = Math.max(3, Math.min(laneH - 10, (pct / 100) * (laneH - 10)));
-      const r = ns("rect", { x: px(p.x).toFixed(1), y: base - h,
-                             width: barW(p).toFixed(1), height: h, fill: "#ff6b6b" });
-      const title = ns("title", {});
-      title.textContent = `${d.t} ${new Date(p.x * 60000).toLocaleString()} — ` +
-        `${lost}/${p.n} probes lost (${pct.toFixed(1)}%)` +
-        ((p.bucket_s || 60) > 60 ? ` over ${Math.round(p.bucket_s / 3600)} h` : "");
-      r.appendChild(title);
-      svg.appendChild(r);
-    }
-  });
-  note.textContent = anyLoss
-    ? "a bar is a span where at least one probe went unanswered; its height is the "
-      + "share of that span's probes lost (full height is 100%), floored at 3 px so "
-      + "a single loss stays visible — hover for the count"
-    : `no loss recorded in ${samples} sampled spans — the bars are absent because ` +
-      `the counts are zero, not because the chart failed`;
-}
+// ----------------------------------------------------------------- the chart
 
 function srv(r) { return (r.server || "").split(/[ ,]/)[0] || "?"; }
 
@@ -542,11 +336,10 @@ async function load() {
     rtt_excess_ms: th.rtt_excess_ms == null ? "not set" : fmt(th.rtt_excess_ms, 0) + " ms",
     rtt_warn_ms: th.rtt_warn_ms == null ? "not set" : fmt(th.rtt_warn_ms, 0) + " ms",
     dl_warn_mbps: si0.dl_warn_mbps == null ? "not set" : fmt(si0.dl_warn_mbps, 0) + " Mbps",
+    ul_warn_mbps: si0.ul_warn_mbps == null ? "not set" : fmt(si0.ul_warn_mbps, 0) + " Mbps",
   };
   document.getElementById("facts").innerHTML = facts(summary, localise);
 
-  rttChart(localise);
-  lossChart(localise);
   speedChart(speed, (summary.status_inputs || {}).dl_warn_mbps);
 }
 document.getElementById("facts").addEventListener("click", (e) => {
