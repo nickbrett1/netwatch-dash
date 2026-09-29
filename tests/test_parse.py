@@ -42,6 +42,31 @@ def test_probe_lines_parse_and_are_recognised():
     assert drift.bad_lines == 0
 
 
+def test_lan_speed_events_are_recognised():
+    """`kind: lan_speed` is a known kind, so it is not counted as drift."""
+    drift = Drift()
+    rec = parse_event(
+        '{"ts":"2026-09-29T04:10:00Z","kind":"lan_speed",'
+        '"peer":"192.168.1.2","dl_mbps":941.2,"ul_mbps":938.7}',
+        drift,
+    )
+    assert rec is not None
+    assert drift.count == 0
+    assert drift.unknown_kinds == []
+
+
+def test_lan_speed_unknown_field_is_counted_not_dropped():
+    """The contract's rule holds for the new kind too: a new field is a number."""
+    drift = Drift()
+    parse_event(
+        '{"ts":"t","kind":"lan_speed","peer":"192.168.1.2","dl_mbps":1.0,'
+        '"ul_mbps":1.0,"brand_new":9}',
+        drift,
+    )
+    assert drift.unknown_fields == ["brand_new"]
+    assert drift.count == 1
+
+
 def test_unknown_field_is_counted_not_dropped():
     drift = Drift()
     rec = parse_event('{"ts":"x","kind":"probe","rtt_ms":1.0,"brand_new":7}', drift)

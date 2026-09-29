@@ -64,6 +64,36 @@ energ…` and `autoselect`. **Unknown is never 1000baseT.**
 {"ts":"<ISO-UTC Z>","kind":"speed","dl_mbps":523.4,"ul_mbps":565.6,"ping_ms":4.9,"server":"Verizon New York, NY"}
 ```
 
+### `kind: "lan_speed"` (added 2026-09-29)
+```json
+{"ts":"<ISO-UTC Z>","kind":"lan_speed","peer":"192.168.1.2","dl_mbps":941.2,"ul_mbps":938.7}
+```
+
+The Mac↔NAS LAN throughput test (`netwatch lan-speed`, daily under launchd).
+Same down/up shape as `speed`, but the far end is a `peer` we own rather than a
+`server` on the internet: it measures the switch and cable between two boxes,
+which is the one thing a WAN speed test cannot see — a renegotiated link, a bad
+cable or a failing switch port caps the LAN while the WAN test still reads
+healthy.
+
+Directions are named from the **Mac's** point of view: `ul_mbps` is what the Mac
+sends (iperf3 default), `dl_mbps` is what it receives (`iperf3 -R`).
+
+Rules the producer holds, and the consumer relies on:
+
+- **A run that could not happen writes nothing.** No iperf3, no server on the
+  peer's port, a failed connection — none of these produce a record. `unknown`
+  is never written as `0`, the same rule as everywhere else (§6): "the test could
+  not run" and "the wire carried no throughput" are different facts.
+- **A missing figure is omitted, not zeroed.** If iperf3 returns a document with
+  no throughput for a direction, the producer logs and emits nothing rather than
+  a half record.
+
+It is **not a status input** (§7): the WAN `speed` run is the throughput signal
+the status derives from, so a slow LAN run colours its own drill-in tiles and
+nothing else. The dashboard reads it back out of the same `events.jsonl` tail as
+`probe`/`speed` and serves it at `/api/lan-speed`.
+
 ### Rotation
 `events.jsonl.archive-<ts>` files exist — history resets at rotation. Read the
 glob or accept the reset; ~1,900 lines ≈ 7 days at capture.
@@ -135,6 +165,11 @@ second one, and the producer ignores it. It is a judgement about a WAN, so the
 host sets it and the dashboard invents no default — an absent key is reported as
 absent (schema §6) and simply skips that comparison.
 
+The LAN test's own keys (`LAN_PEER`, `LAN_PORT`, `LAN_DURATION`, `LAN_STREAMS`,
+`IPERF_BIN`) live in the same producer config file and are read only by
+`netwatch lan-speed`; none of them is in the dashboard's whitelist, so the
+dashboard neither reads nor reports them.
+
 `RTT_ALERT` arrived on 2026-09-20 with the decision to stop treating gateway
 ICMP as a health signal (§7); the producer defaults it to `off`, so it logs RTT
 to `events.jsonl` but raises no `rtt`/`rtt-local` alarm. Reading it lets
@@ -170,6 +205,7 @@ network (confirmed: an `rtt` alert fired 2026-09-20T12:54Z).
 | **Link rate** | probe `media` + `# link_change` | 300 s | **Health** — renegotiation / bad-cable canary |
 | **en0 error counters** | *not recorded yet — see §8* | — | **Health (missing)** — the direct hardware answer |
 | **Throughput** | `kind:speed`; optional Mac↔peer iperf3 | daily | **Health** — capacity; the recommended gw-ICMP replacement |
+| **LAN throughput** | `kind:lan_speed` (iperf3, Mac↔NAS) | daily | Context — the internal wire's capacity, reported and charted on the drill-in; deliberately **not** a status input, so it never paints the pill |
 | **Peer RTT** | probe `peer_ms`, `peer_loss_pct` | 300 s | Health, with the caveat that the peer can itself be busy |
 | **Saturation** | probe `rx_mbps` vs `SAT_MBPS`, `saturated` | 300 s | Context; suppresses latency alarms on a busy link |
 | **Router state** | `# orbi` marker | irregular | Context: `internet_text`, satellites, devices |

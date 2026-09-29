@@ -33,6 +33,7 @@ from .settings import PROJECT, Settings
 # How many records a collection endpoint returns when nobody asked for a number.
 PROBE_DEFAULT_LIMIT = 60  # a 5-hour window at the 300 s cadence
 SPEED_DEFAULT_LIMIT = 20  # a few weeks of daily runs
+LAN_SPEED_DEFAULT_LIMIT = 20  # likewise: a few weeks of daily LAN runs
 
 
 def healthz_body(
@@ -135,6 +136,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/speed")
     def api_speed(limit: int = Query(SPEED_DEFAULT_LIMIT, ge=1, le=1000)) -> dict:
         return snap().collection("speed", limit)
+
+    @app.get("/api/lan-speed")
+    def api_lan_speed(
+        limit: int = Query(LAN_SPEED_DEFAULT_LIMIT, ge=1, le=1000)
+    ) -> dict:
+        """The Mac<->NAS LAN runs: the internal wire's up/down capacity over time.
+
+        A separate endpoint from `/api/speed` because it is a separate question —
+        the WAN runs measure the internet, these measure the switch and cable
+        between two boxes we own — and a chart that mixed them would be one axis
+        for two links.
+        """
+        return snap().collection("lan_speed", limit)
 
     @app.get("/api/link")
     def api_link() -> dict:

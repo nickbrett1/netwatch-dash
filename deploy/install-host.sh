@@ -118,7 +118,7 @@ EOF
 fi
 
 echo "-- producer jobs (from deploy/plists/, unchanged behaviour) --"
-for l in com.nick.netwatch.gwping com.nickbrett.netwatch.probe com.nickbrett.netwatch.speed; do
+for l in com.nick.netwatch.gwping com.nickbrett.netwatch.probe com.nickbrett.netwatch.speed com.nickbrett.netwatch.lan-speed; do
   install_plist "$HERE/plists/$l.plist" "$l"
 done
 

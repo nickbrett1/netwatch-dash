@@ -61,6 +61,9 @@ class EventLog:
     # usable timestamp is not in here — it is in `drift.bad_lines`.
     probes: list[dict] = field(default_factory=list)
     speeds: list[dict] = field(default_factory=list)
+    # The Mac<->NAS LAN throughput runs (`kind:"lan_speed"`), same shape as
+    # `speeds` but a different question: the wire between our own boxes.
+    lan_speeds: list[dict] = field(default_factory=list)
     drift: Drift = field(default_factory=Drift)
     lines: int = 0
     size: int | None = None
@@ -77,6 +80,10 @@ class EventLog:
     @property
     def newest_speed(self) -> dict | None:
         return self.speeds[-1] if self.speeds else None
+
+    @property
+    def newest_lan_speed(self) -> dict | None:
+        return self.lan_speeds[-1] if self.lan_speeds else None
 
 
 def read(path: Path, tail_bytes: int = DEFAULT_TAIL_BYTES) -> EventLog:
@@ -122,13 +129,18 @@ def read(path: Path, tail_bytes: int = DEFAULT_TAIL_BYTES) -> EventLog:
         if record is None:
             continue
         kind = record.get("kind")
-        if kind not in ("probe", "speed"):
+        if kind not in ("probe", "speed", "lan_speed"):
             continue
         if timestamp(record) is None:
             log.drift.bad_lines += 1
             continue
-        (log.probes if kind == "probe" else log.speeds).append(record)
+        {
+            "probe": log.probes,
+            "speed": log.speeds,
+            "lan_speed": log.lan_speeds,
+        }[kind].append(record)
 
     log.probes.sort(key=timestamp)
     log.speeds.sort(key=timestamp)
+    log.lan_speeds.sort(key=timestamp)
     return log

@@ -15,7 +15,7 @@ deployment path now** — one artifact both populates and wires. `deploy/` and
 | File here | Origin on mac-studio | Role |
 | --- | --- | --- |
 | `gwping.py` | `~/netwatch/gwping.py` | Continuous writer of `~/netwatch/gateway_rtt.csv`; also the authenticated Orbi poll that emits `# orbi` markers and `# link_change` |
-| `netwatch` | `~/.local/bin/netwatch` | The `probe` (300 s) and `speed` (daily 04:00) subcommands; appends to `~/.local/state/netwatch/events.jsonl` |
+| `netwatch` | `~/.local/bin/netwatch` | The `probe` (300 s), `speed` (daily 04:00) and `lan-speed` (daily 04:10, iperf3 Mac↔NAS) subcommands; appends to `~/.local/state/netwatch/events.jsonl` |
 | `flapwatch` | `~/.local/bin/flapwatch` | Not scheduled by any launchd job |
 | `check_link.sh` | `~/netwatch/check_link.sh` | Not scheduled by any launchd job |
 | `probe_icmp_vs_tcp.py` | `~/netwatch/probe_icmp_vs_tcp.py` | Diagnostic |

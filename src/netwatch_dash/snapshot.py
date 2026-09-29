@@ -46,6 +46,12 @@ NOT_STATUS_INPUTS = (
         "health signals but leaves them out of the derivation, because a busy peer "
         "is not a path fault. Reported in /api/localise as evidence instead."
     ),
+    (
+        "Mac<->NAS LAN throughput (`kind: lan_speed`): a capacity measurement of "
+        "the wire between our own boxes, reported in /api/lan-speed and drawn on "
+        "the drill-in. It is not a status input — the WAN `speed` run is the one "
+        "§7 lists — so a slow LAN run colours its own tile and nothing else."
+    ),
 )
 
 # Endpoints that exist by name and not by behaviour, and why. Empty now: the
@@ -69,6 +75,18 @@ PROBE_FIELDS = (
     "peer_loss_pct",
 )
 SPEED_FIELDS = ("ts", "dl_mbps", "ul_mbps", "ping_ms", "server")
+# The Mac<->NAS LAN test's field set, and nothing else, so a field the producer
+# adds shows up as drift rather than as a silent extra key.
+LAN_SPEED_FIELDS = ("ts", "peer", "dl_mbps", "ul_mbps")
+
+#: kind -> (the view builder, the record list the bounded tail actually held).
+#: One table so `/api/probe`, `/api/speed` and `/api/lan-speed` cannot disagree
+#: about which list a kind reads or what the answer is keyed by.
+COLLECTIONS = {
+    "probe": ("probe_views", "probes"),
+    "speed": ("speed_views", "speeds"),
+    "lan_speed": ("lan_speed_views", "lan_speeds"),
+}
 
 
 def _number(value: object) -> float | None:
@@ -228,12 +246,20 @@ class Snapshot:
         return self.events.newest_speed
 
     @property
+    def lan_speed(self) -> dict | None:
+        return self.events.newest_lan_speed
+
+    @property
     def probe_age_s(self) -> float | None:
         return self.age_s(self.probe)
 
     @property
     def speed_age_s(self) -> float | None:
         return self.age_s(self.speed)
+
+    @property
+    def lan_speed_age_s(self) -> float | None:
+        return self.age_s(self.lan_speed)
 
     def view(self, record: dict | None, fields: tuple[str, ...]) -> dict | None:
         """A record as the schema describes it, with its age.
@@ -258,6 +284,13 @@ class Snapshot:
         if limit <= 0:
             return []
         return [self.view(r, SPEED_FIELDS) for r in self.events.speeds[-limit:]]
+
+    def lan_speed_views(self, limit: int) -> list[dict]:
+        if limit <= 0:
+            return []
+        return [
+            self.view(r, LAN_SPEED_FIELDS) for r in self.events.lan_speeds[-limit:]
+        ]
 
     # --- the status ---------------------------------------------------------
 
@@ -778,6 +811,7 @@ class Snapshot:
             "now": _iso(self.now),
             "probe": self.view(self.probe, PROBE_FIELDS),
             "speed": self.view(self.speed, SPEED_FIELDS),
+            "lan_speed": self.view(self.lan_speed, LAN_SPEED_FIELDS),
             "streak": self.streak,
             "last_alert": self.last_alert,
             "config": self.config,
@@ -804,9 +838,10 @@ class Snapshot:
         }
 
     def collection(self, kind: str, limit: int) -> dict:
-        """The shape `/api/probe` and `/api/speed` both return."""
-        views = self.probe_views(limit) if kind == "probe" else self.speed_views(limit)
-        held = len(self.events.probes if kind == "probe" else self.events.speeds)
+        """The shape `/api/probe`, `/api/speed` and `/api/lan-speed` all return."""
+        builder, held_attr = COLLECTIONS[kind]
+        views = getattr(self, builder)(limit)
+        held = len(getattr(self.events, held_attr))
         return {
             kind + "s": views,
             "returned": len(views),

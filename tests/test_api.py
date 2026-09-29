@@ -341,6 +341,59 @@ def test_speed_collection_reads_the_speed_events(tmp_path):
     assert body["speeds"][0]["age_s"] == 31800.0  # 12:50 minus 04:00
 
 
+def test_lan_speed_collection_reads_the_lan_events(tmp_path):
+    lan = json.dumps(
+        {
+            "ts": "2026-09-20T04:10:00Z",
+            "kind": "lan_speed",
+            "peer": "192.168.1.2",
+            "dl_mbps": 941.2,
+            "ul_mbps": 938.7,
+        }
+    )
+    settings = make_settings(tmp_path, events_text=lan)
+    snap = snapshot.build(settings, now=at(AFTER_NEWEST))
+
+    body = snap.collection("lan_speed", 20)
+
+    assert body["returned"] == 1
+    assert body["in_window"] == 1
+    assert body["lan_speeds"][0]["peer"] == "192.168.1.2"
+    assert body["lan_speeds"][0]["dl_mbps"] == 941.2
+    assert body["lan_speeds"][0]["ul_mbps"] == 938.7
+    # The view is the schema's field set and nothing else, plus the age.
+    assert set(body["lan_speeds"][0]) == set(snapshot.LAN_SPEED_FIELDS) | {"age_s"}
+
+
+def test_a_lan_speed_run_is_reported_but_never_moves_the_status(tmp_path):
+    """The WAN `speed` run is the status input (§7); the LAN run is a measurement.
+
+    A slow Mac<->NAS run is worth seeing, but it is not evidence about the
+    internet, so it must not paint the tile — it colours only its own (uncoloured)
+    LAN tiles.
+    """
+    lan = json.dumps(
+        {
+            "ts": "2026-09-20T04:10:00Z",
+            "kind": "lan_speed",
+            "peer": "192.168.1.2",
+            "dl_mbps": 12.0,
+            "ul_mbps": 9.0,
+        }
+    )
+    settings = make_settings(
+        tmp_path,
+        events_text=probe("2026-09-20T12:49:00Z") + "\n" + lan,
+        config="DL_WARN_MBPS=100\nUL_WARN_MBPS=100\n",
+    )
+    snap = snapshot.build(settings, now=at(AFTER_NEWEST))
+
+    assert snap.lan_speed["dl_mbps"] == 12.0
+    assert snap.status == "ok"
+    # And the reason list says the LAN run is deliberately not an input.
+    assert any("lan_speed" in r for r in snap.status_reason())
+
+
 def test_summary_carries_its_own_evidence(tmp_path):
     settings = make_settings(
         tmp_path,
@@ -369,7 +422,13 @@ def test_every_endpoint_answers_200(tmp_path):
     settings = make_settings(tmp_path, events_text=fixture_events())
     client = TestClient(create_app(settings))
 
-    for url in ("/healthz", "/api/summary", "/api/probe?limit=2", "/api/speed"):
+    for url in (
+        "/healthz",
+        "/api/summary",
+        "/api/probe?limit=2",
+        "/api/speed",
+        "/api/lan-speed",
+    ):
         response = client.get(url)
         assert response.status_code == 200, url
         assert response.json(), url

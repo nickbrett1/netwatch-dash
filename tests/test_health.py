@@ -254,6 +254,10 @@ def test_the_landing_page_is_the_drill_in(tmp_path):
     # Bandwidth is a single number on the tile; the daily runs behind it are the
     # other half of "drill in", and live behind a different endpoint.
     assert "/api/speed" in response.text
+    # The LAN link is the second bandwidth chart — its own endpoint and its own
+    # axis, so the WAN and the internal wire are never drawn on one scale.
+    assert "/api/lan-speed" in response.text
+    assert 'id="lan"' in response.text
 
 
 def test_the_landing_page_no_longer_draws_the_unread_charts(tmp_path):
@@ -285,7 +289,10 @@ def test_every_tile_can_explain_its_own_thresholds(tmp_path):
 
     html = client.get("/").text
 
-    for metric in ("forwarded", "gateway", "loss", "link", "down", "up", "en0", "peer"):
+    for metric in (
+        "forwarded", "gateway", "loss", "link", "down", "up",
+        "landown", "lanup", "en0", "peer",
+    ):
         assert f"  {metric}: {{ title:" in html
     assert 'closest(".fact.link")' in html
     # The upload threshold is quoted in the Up tile's definition like the rest.

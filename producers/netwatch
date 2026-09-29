@@ -14,6 +14,7 @@
 #
 #   netwatch probe      cheap gateway-RTT + link check  (run every ~5 min)
 #   netwatch speed       full Ookla WAN throughput test  (run daily)
+#   netwatch lan-speed   iperf3 Mac<->NAS LAN throughput (run daily)
 #   netwatch report [n]  show last n runs (default 20)
 #   netwatch tail        live view
 #
@@ -43,6 +44,11 @@ SAT_LOAD=""               # optional: 1-min load avg >= this also counts as "bus
 DL_WARN_MBPS=250          # WAN download below this = alert
 UL_WARN_MBPS=250          # WAN upload below this = alert
 SPEEDTEST_BIN=""          # path to Ookla CLI; auto-detected if empty
+LAN_PEER=""              # far end of the daily LAN test; empty = use NET_PEER (the NAS)
+LAN_PORT=5201            # iperf3 server port on LAN_PEER
+LAN_DURATION=5           # seconds per direction, per LAN run
+LAN_STREAMS=4            # parallel streams; one flow will not fill a gigabit
+IPERF_BIN=""             # path to iperf3; auto-detected if empty
 NTFY_TOPIC=""             # e.g. "nick-netwatch-9f3a" -> phone push via ntfy.sh
 ALERT_COOLDOWN=3600       # seconds between repeat alerts of the same kind
 NOTIFY_MACOS=true         # also show a desktop notification
@@ -95,6 +101,93 @@ find_speedtest() {
   for c in "$HOME/.local/bin/speedtest" /private/tmp/ookla/speedtest /Volumes/home/speedtest/speedtest "$(command -v speedtest 2>/dev/null)"; do
     [ -n "$c" ] && [ -x "$c" ] && { echo "$c"; return; }
   done
+}
+
+# --- LAN speedtest (Mac <-> NAS) ------------------------------------------
+# The WAN `speed` run answers "how fast is the internet". This answers "how fast
+# is my own LAN" — the switch and cable between two boxes we own — which is the
+# one thing a WAN test cannot see: a renegotiated link, a bad cable or a failing
+# switch port all cap the LAN while the WAN test still reads healthy.
+#
+# Directions are named from *this Mac's* point of view:
+#   up   = this Mac sends   (iperf3 default)
+#   down = this Mac receives (iperf3 -R)
+find_iperf() {
+  [ -n "$IPERF_BIN" ] && [ -x "$IPERF_BIN" ] && { echo "$IPERF_BIN"; return; }
+  for c in /opt/homebrew/bin/iperf3 /usr/local/bin/iperf3 "$(command -v iperf3 2>/dev/null)"; do
+    [ -n "$c" ] && [ -x "$c" ] && { echo "$c"; return; }
+  done
+}
+
+# Throughput from an `iperf3 -J` document, in Mbps. $1 is the sum to read:
+# `sum_sent` for the direction this Mac sends, `sum_received` for the one it
+# receives. Prints nothing when the figure is absent — an unknown rate is not a
+# zero, and it must never be written as one.
+iperf_mbps() {
+  python3 -c '
+import json,sys
+try:
+    d=json.load(sys.stdin)
+except ValueError:
+    raise SystemExit(0)          # an unreadable document is an absent figure…
+key=sys.argv[1]
+end=d.get("end") if isinstance(d,dict) else None
+s=(end or {}).get(key,{}).get("bits_per_second")
+print("" if s is None else round(s/1e6,1))' "$1" 2>/dev/null
+}
+
+# One direction of the LAN test, with a single retry. iperf3 occasionally
+# answers the second test with a control/error payload instead of results — the
+# server still busy from the test just before — and the JSON then has no
+# `sum_*` key at all. Observed on the first Mac->NAS run 2026-09-29: the
+# download direction failed once immediately after the upload and succeeded on
+# an identical re-run. A daily job that loses a whole day to a transient is not
+# worth having, so a blank figure is retried once after a short pause; a real
+# failure (no server, refused) still exhausts both attempts and reports nothing.
+# Echoes the Mbps on success and nothing on failure.
+iperf_dir() {  # <bin> <peer> <sum_sent|sum_received> [extra iperf3 args...]
+  local bin="$1" peer="$2" sum="$3" attempt js mbps
+  shift 3
+  for attempt in 1 2; do
+    js=$("$bin" -c "$peer" -p "$LAN_PORT" -t "$LAN_DURATION" -P "$LAN_STREAMS" "$@" -J 2>/dev/null) || js=""
+    mbps=$(printf '%s' "$js" | iperf_mbps "$sum")
+    if [ -n "$mbps" ]; then printf '%s' "$mbps"; return 0; fi
+    [ "$attempt" = 1 ] && sleep 1
+  done
+  return 1
+}
+
+cmd_lan_speed() {
+  local peer bin up dl
+  peer="${LAN_PEER:-$NET_PEER}"
+  case "$peer" in
+    ""|none|off|no) log "lan-speed: no LAN_PEER/NET_PEER set"
+      echo "lan-speed: no peer configured" >&2; return 1 ;;
+  esac
+  bin=$(find_iperf)
+  if [ -z "$bin" ]; then
+    log "lan-speed: no iperf3 found"; echo "no iperf3 found" >&2; return 1
+  fi
+
+  # up: this Mac sends. down: the peer sends, this Mac receives (-R). Neither
+  # writes anything on failure: "the test could not run" and "the link carried no
+  # throughput" are different facts, and a zero record would state the second
+  # (schema §6).
+  up=$(iperf_dir "$bin" "$peer" sum_sent)
+  # A brief settle so the server is idle before the reverse test starts (the
+  # transient above happens when it is not).
+  sleep 1
+  dl=$(iperf_dir "$bin" "$peer" sum_received -R)
+
+  if [ -z "$up" ] || [ -z "$dl" ]; then
+    log "lan-speed: iperf3 returned no throughput (up='${up}' down='${dl}')"
+    echo "iperf3 returned no throughput (is an iperf3 server on $peer:$LAN_PORT?)" >&2
+    return 1
+  fi
+
+  emit "\"kind\":\"lan_speed\",\"peer\":\"$peer\",\"dl_mbps\":$dl,\"ul_mbps\":$up"
+  log "lan-speed peer=$peer dl=${dl}Mbps ul=${up}Mbps"
+  echo "LAN ${peer}  DL ${dl} Mbps  UL ${up} Mbps"
 }
 
 # --- probe ----------------------------------------------------------------
@@ -253,23 +346,30 @@ for r in rows:
         if r.get("peer_ms") is not None: extra+=f"  peer {r['peer_ms']}ms"
         if r.get("rx_mbps") is not None: extra+=f"  rx {r['rx_mbps']}Mbps" + (" [SATURATED]" if sat else "")
         print(f"{t}  probe   rtt {r.get('rtt_ms'):>6} ms  loss {r.get('loss_pct')}%  {r.get('iface')} {r.get('media','')}{extra}{flag}")
+    elif r["kind"]=="lan_speed":
+        print(f"{t}  lan     DL {r.get('dl_mbps'):>6}  UL {r.get('ul_mbps'):>6} Mbps  peer {r.get('peer')}")
     else:
         print(f"{t}  speed   DL {r.get('dl_mbps'):>6}  UL {r.get('ul_mbps'):>6} Mbps  ping {r.get('ping_ms')} ms  {r.get('server')}")
 probes=[r for r in rows if r["kind"]=="probe"]
 speeds=[r for r in rows if r["kind"]=="speed"]
+lans=[r for r in rows if r["kind"]=="lan_speed"]
 if probes:
     rs=[p["rtt_ms"] for p in probes]
     print(f"\nprobe: {len(probes)} runs, rtt min/avg/max {min(rs):.2f}/{sum(rs)/len(rs):.2f}/{max(rs):.2f} ms")
 if speeds:
     d=[s["dl_mbps"] for s in speeds]; u=[s["ul_mbps"] for s in speeds]
     print(f"speed: {len(speeds)} runs, DL {min(d)}-{max(d)} Mbps, UL {min(u)}-{max(u)} Mbps")
+if lans:
+    d=[s["dl_mbps"] for s in lans]; u=[s["ul_mbps"] for s in lans]
+    print(f"lan:   {len(lans)} runs, DL {min(d)}-{max(d)} Mbps, UL {min(u)}-{max(u)} Mbps")
 EOF
 }
 
 case "${1:-probe}" in
-  probe)  cmd_probe ;;
-  speed)  cmd_speed ;;
-  report) shift; cmd_report "$@" ;;
-  tail)   tail -f "$LOG" ;;
-  *) echo "usage: netwatch {probe|speed|report [n]|tail}" >&2; exit 2 ;;
+  probe)     cmd_probe ;;
+  speed)     cmd_speed ;;
+  lan-speed) cmd_lan_speed ;;
+  report)    shift; cmd_report "$@" ;;
+  tail)      tail -f "$LOG" ;;
+  *) echo "usage: netwatch {probe|speed|lan-speed|report [n]|tail}" >&2; exit 2 ;;
 esac

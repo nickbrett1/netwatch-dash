@@ -99,6 +99,12 @@ LANDING_HTML = """<!doctype html>
     <svg id="speed" viewBox="0 0 1000 240" preserveAspectRatio="none"></svg>
     <p class="muted small" id="speed-note"></p>
   </section>
+  <section>
+    <h2>LAN bandwidth — Mac ↔ NAS (Mbps)</h2>
+    <div class="legend" id="lan-legend"></div>
+    <svg id="lan" viewBox="0 0 1000 240" preserveAspectRatio="none"></svg>
+    <p class="muted small" id="lan-note"></p>
+  </section>
 </main>
 <script>
 // Long-form definitions, on demand. They are here rather than on the page
@@ -143,6 +149,18 @@ const INFO = {
     body: "The most recent daily speed test's upload. Warn below {ul_warn_mbps}. " +
       "Same rule as download: a stale run is displayed but does not colour the " +
       "status." },
+  landown: { title: "LAN down (NAS → Mac)",
+    body: "Throughput of the daily iperf3 run from the NAS to this Mac, over the " +
+      "wired LAN. This is the internal wire's capacity — the switch and the " +
+      "cable between two boxes we own — not the internet, so it is a separate " +
+      "measurement from Down/Up above and never moves the status. Expected is " +
+      "close to the link rate; a figure far below it points at the cable, the " +
+      "switch port or a renegotiated link, which is exactly what a WAN speed " +
+      "test cannot see." },
+  lanup: { title: "LAN up (Mac → NAS)",
+    body: "Throughput of the daily iperf3 run from this Mac to the NAS, over the " +
+      "wired LAN. The mirror of LAN down. Reported, not a status input; a " +
+      "stale run is shown but is not evidence about the wire now." },
   en0: { title: "en0 errors",
     body: "Error counters for the LAN interface — input errors + output errors + " +
       "collisions, from the producer's # iferrs markers (netstat -ib). The " +
@@ -186,6 +204,13 @@ function showInfo(id) {
 function fmt(v, digits) {
   return v == null ? "–" : Number(v).toFixed(digits == null ? 1 : digits);
 }
+function clear(svg) { while (svg.firstChild) svg.removeChild(svg.firstChild); }
+function ago(s) {
+  if (s == null) return "?";
+  if (s >= 172800) return Math.round(s / 86400) + "d ago";
+  if (s >= 7200) return Math.round(s / 3600) + "h ago";
+  return Math.max(0, Math.round(s / 60)) + "m ago";
+}
 
 // ---------------------------------------------------------------- the numbers
 
@@ -196,9 +221,16 @@ function fact(k, v, hint, cls, metric) {
     ${hint ? `<div class="h">${hint}</div>` : ""}</div>`;
 }
 
-function facts(summary, localise) {
+function facts(summary, localise, lan) {
   const si = summary.status_inputs || {};
   const warn = si.forwarded_warn_ms;
+  // The newest Mac<->NAS run, from `/api/lan-speed` (oldest-first). It is a
+  // measurement, not a status input, so its tiles are never coloured — but it is
+  // still aged, because a stale throughput figure that looks current is the same
+  // defect as an unqualified green light.
+  const lruns = (lan || {}).lan_speeds || [];
+  const lnew = lruns.length ? lruns[lruns.length - 1] : null;
+  const lhint = lnew ? `${lnew.peer || "NAS"} · ${ago(lnew.age_s)}` : "no LAN run yet";
   const excessLimit = si.forwarded_excess_ms;
   // The fault comes from the server (`reading.fault`), not from re-deciding the
   // rule here: two implementations of "is the path at fault" is how a tile and
@@ -246,6 +278,13 @@ function facts(summary, localise) {
     fact("Up", fmt(si.ul_mbps, 1) + " Mbps",
          uww == null ? "no threshold set" : `warn below ${fmt(uww, 0)}`,
          thrCls(si.ul_mbps, uww), "up"),
+    // The internal wire, measured daily between this Mac and the NAS. Separate
+    // from Down/Up above, which are the internet: one chart per link, so neither
+    // axis has to explain the other.
+    fact("LAN down", lnew ? fmt(lnew.dl_mbps, 1) + " Mbps" : "–",
+         lhint, "", "landown"),
+    fact("LAN up", lnew ? fmt(lnew.ul_mbps, 1) + " Mbps" : "–",
+         lhint, "", "lanup"),
     fact("en0 errors", String(si.en0_errors == null ? "–" : si.en0_errors),
          si.en0_errors == null ? "no # iferrs in window" : "ierrs+oerrs+coll; zero expected",
          en0Cls, "en0"),
@@ -259,18 +298,13 @@ function facts(summary, localise) {
 
 function srv(r) { return (r.server || "").split(/[ ,]/)[0] || "?"; }
 
-function speedChart(data, warn) {
-  const svg = document.getElementById("speed");
-  // `/api/speed` returns oldest-first already; drawing it in that order is what
-  // makes the Sep-16 cliff read left-to-right.
-  const runs = data.speeds || [];
-  const note = document.getElementById("speed-note");
-  const legend = document.getElementById("speed-legend");
-  if (!runs.length) {
-    text(svg, 10, 24, "no speed tests in the window");
-    note.textContent = "the daily job has not recorded a run yet";
-    return;
-  }
+// The body both bandwidth charts share: paired down/up bars, one run per slot,
+// oldest on the left. `opts` is what differs — the colours, the two labels, the
+// per-run sub-label and tooltip, and an optional warn line. Keeping the two
+// charts on one implementation is what stops the LAN chart silently drifting
+// from the WAN one (a different axis, a different slot width) over time.
+function drawBars(svg, runs, opts) {
+  clear(svg);
   const maxv = Math.max(...runs.flatMap(r => [r.dl_mbps || 0, r.ul_mbps || 0])) * 1.1 || 1;
   const top = 16, base = 196;
   const slot = 936 / runs.length;
@@ -280,33 +314,55 @@ function speedChart(data, warn) {
   text(svg, 6, top + 4, maxv.toFixed(0));
   text(svg, 6, base + 4, "0");
   svg.appendChild(ns("line", { x1: 44, y1: base, x2: 980, y2: base, stroke: "#23262f" }));
-  if (warn && warn <= maxv) {
-    svg.appendChild(ns("line", { x1: 44, y1: py(warn), x2: 980, y2: py(warn),
+  if (opts.warn && opts.warn <= maxv) {
+    svg.appendChild(ns("line", { x1: 44, y1: py(opts.warn), x2: 980, y2: py(opts.warn),
       stroke: "#f0c14b", "stroke-width": 1, "stroke-dasharray": "4 4", opacity: 0.7 }));
-    text(svg, 984, py(warn) + 4, `warn ${fmt(warn, 0)}`, { "text-anchor": "end",
+    text(svg, 984, py(opts.warn) + 4, `warn ${fmt(opts.warn, 0)}`, { "text-anchor": "end",
       fill: "#f0c14b" });
   }
   runs.forEach((r, i) => {
     const cx = 44 + slot * i + slot / 2;
-    [[-1, r.dl_mbps, "#5ee08a", "dl"], [1, r.ul_mbps, "#63b3ed", "ul"]].forEach(([side, v, col, label]) => {
-      if (v == null) return;
-      const x = cx + (side < 0 ? -bw - 2 : 2);
-      const rect = ns("rect", { x: x.toFixed(1), y: py(v).toFixed(1), width: bw.toFixed(1),
-        height: (base - py(v)).toFixed(1), fill: col, rx: 2 });
-      const title = ns("title", {});
-      title.textContent = `${r.ts} — ${label} ${v.toFixed(1)} Mbps, ` +
-        `ping ${r.ping_ms} ms, ${r.server || "unknown server"}`;
-      rect.appendChild(title);
-      svg.appendChild(rect);
-      text(svg, x + bw / 2, py(v) - 4, v.toFixed(0), { "text-anchor": "middle",
-        fill: "#6b7280", "font-size": 10 });
-    });
+    [[-1, r.dl_mbps, opts.dlColor, opts.dlLabel], [1, r.ul_mbps, opts.ulColor, opts.ulLabel]]
+      .forEach(([side, v, col, label]) => {
+        if (v == null) return;
+        const x = cx + (side < 0 ? -bw - 2 : 2);
+        const rect = ns("rect", { x: x.toFixed(1), y: py(v).toFixed(1), width: bw.toFixed(1),
+          height: (base - py(v)).toFixed(1), fill: col, rx: 2 });
+        const title = ns("title", {});
+        title.textContent = opts.tip(r, label, v);
+        rect.appendChild(title);
+        svg.appendChild(rect);
+        text(svg, x + bw / 2, py(v) - 4, v.toFixed(0), { "text-anchor": "middle",
+          fill: "#6b7280", "font-size": 10 });
+      });
     text(svg, cx, base + 16, mmdd(r.ts), { "text-anchor": "middle" });
-    text(svg, cx, base + 30, srv(r), { "text-anchor": "middle", "font-size": 9 });
+    text(svg, cx, base + 30, opts.sub(r), { "text-anchor": "middle", "font-size": 9 });
   });
-  legend.innerHTML =
-    `<span class="key"><span class="swatch" style="background:#5ee08a"></span>download</span>` +
-    `<span class="key"><span class="swatch" style="background:#63b3ed"></span>upload</span>`;
+  opts.legend.innerHTML =
+    `<span class="key"><span class="swatch" style="background:${opts.dlColor}"></span>${opts.dlLabel}</span>` +
+    `<span class="key"><span class="swatch" style="background:${opts.ulColor}"></span>${opts.ulLabel}</span>`;
+}
+
+function speedChart(data, warn) {
+  const svg = document.getElementById("speed");
+  const note = document.getElementById("speed-note");
+  // `/api/speed` returns oldest-first already; drawing it in that order is what
+  // makes the Sep-16 cliff read left-to-right.
+  const runs = data.speeds || [];
+  if (!runs.length) {
+    clear(svg);
+    text(svg, 10, 24, "no speed tests in the window");
+    note.textContent = "the daily job has not recorded a run yet";
+    return;
+  }
+  drawBars(svg, runs, {
+    warn,
+    dlColor: "#5ee08a", ulColor: "#63b3ed", dlLabel: "download", ulLabel: "upload",
+    legend: document.getElementById("speed-legend"),
+    sub: srv,
+    tip: (r, label, v) => `${r.ts} — ${label} ${v.toFixed(1)} Mbps, ` +
+      `ping ${r.ping_ms} ms, ${r.server || "unknown server"}`,
+  });
   const first = runs[0], last = runs[runs.length - 1];
   const drop = first.dl_mbps && last.dl_mbps
     ? (1 - last.dl_mbps / first.dl_mbps) * 100 : null;
@@ -319,13 +375,46 @@ function speedChart(data, warn) {
     (servers.length > 1 ? ` · server changed: ${servers.join(" → ")}` : "");
 }
 
+// The same chart, over the runs from `/api/lan-speed`: the Mac<->NAS wire. No
+// warn line — a LAN test has no host threshold to draw (it is a measurement, not
+// a status input), and a threshold invented here would be a second opinion about
+// the wire that nothing else agrees with.
+function lanChart(data) {
+  const svg = document.getElementById("lan");
+  const note = document.getElementById("lan-note");
+  const runs = data.lan_speeds || [];
+  if (!runs.length) {
+    clear(svg);
+    text(svg, 10, 24, "no LAN tests in the window");
+    note.textContent = "the daily Mac↔NAS run has not recorded yet — " +
+      "check that the NAS iperf3 server is up";
+    return;
+  }
+  drawBars(svg, runs, {
+    warn: null,
+    dlColor: "#5ee08a", ulColor: "#63b3ed",
+    dlLabel: "down (NAS → Mac)", ulLabel: "up (Mac → NAS)",
+    legend: document.getElementById("lan-legend"),
+    sub: r => r.peer || "NAS",
+    tip: (r, label, v) => `${r.ts} — ${label} ${v.toFixed(1)} Mbps ` +
+      `with ${r.peer || "the NAS"}`,
+  });
+  const first = runs[0], last = runs[runs.length - 1];
+  const gbps = v => (v / 1000).toFixed(2);
+  note.textContent = `${runs.length} run(s), oldest ${mmdd(first.ts)} · ` +
+    `newest ${fmt(last.dl_mbps, 0)}/${fmt(last.ul_mbps, 0)} Mbps down/up ` +
+    `(${gbps(last.dl_mbps || 0)}/${gbps(last.ul_mbps || 0)} Gbps) with ` +
+    `${last.peer || "the NAS"}`;
+}
+
 // ------------------------------------------------------------------- the page
 
 async function load() {
-  const [summary, localise, speed] = await Promise.all([
+  const [summary, localise, speed, lanSpeed] = await Promise.all([
     fetch("/api/summary").then(r => r.json()),
     fetch("/api/localise").then(r => r.json()),
     fetch("/api/speed").then(r => r.json()),
+    fetch("/api/lan-speed").then(r => r.json()),
   ]);
   const status = document.getElementById("status");
   status.textContent = summary.status;
@@ -338,9 +427,10 @@ async function load() {
     dl_warn_mbps: si0.dl_warn_mbps == null ? "not set" : fmt(si0.dl_warn_mbps, 0) + " Mbps",
     ul_warn_mbps: si0.ul_warn_mbps == null ? "not set" : fmt(si0.ul_warn_mbps, 0) + " Mbps",
   };
-  document.getElementById("facts").innerHTML = facts(summary, localise);
+  document.getElementById("facts").innerHTML = facts(summary, localise, lanSpeed);
 
   speedChart(speed, (summary.status_inputs || {}).dl_warn_mbps);
+  lanChart(lanSpeed);
 }
 document.getElementById("facts").addEventListener("click", (e) => {
   const tile = e.target.closest(".fact.link");

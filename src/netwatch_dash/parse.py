@@ -30,6 +30,10 @@ PROBE_FIELDS = frozenset(
     }
 )
 SPEED_FIELDS = frozenset({"ts", "kind", "dl_mbps", "ul_mbps", "ping_ms", "server"})
+# The Mac<->NAS LAN throughput test (`netwatch lan-speed`), added 2026-09-29.
+# Same dl/ul shape as `speed`, but the peer is named instead of a speed-test
+# server: this measures the wire between two boxes we own, not the WAN.
+LAN_SPEED_FIELDS = frozenset({"ts", "kind", "peer", "dl_mbps", "ul_mbps"})
 CSV_TARGETS = frozenset({"gw", "wire", "wl", "net"})
 CSV_MARKERS = frozenset(
     {
@@ -117,7 +121,11 @@ def parse_event(line: str, drift: Drift | None = None) -> dict | None:
             drift.bad_lines += 1
         return None
     kind = rec.get("kind")
-    known = {"probe": PROBE_FIELDS, "speed": SPEED_FIELDS}.get(kind)
+    known = {
+        "probe": PROBE_FIELDS,
+        "speed": SPEED_FIELDS,
+        "lan_speed": LAN_SPEED_FIELDS,
+    }.get(kind)
     if drift:
         if known is None:
             drift.unknown_kinds.append(str(kind))
