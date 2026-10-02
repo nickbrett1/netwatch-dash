@@ -15,7 +15,7 @@ deployment path now** — one artifact both populates and wires. `deploy/` and
 | File here | Origin on mac-studio | Role |
 | --- | --- | --- |
 | `gwping.py` | `~/netwatch/gwping.py` | Continuous writer of `~/netwatch/gateway_rtt.csv`; also the authenticated Orbi poll that emits `# orbi` markers and `# link_change` |
-| `netwatch` | `~/.local/bin/netwatch` | The `probe` (300 s), `speed` (daily 04:00) and `lan-speed` (daily 04:10, iperf3 Mac↔NAS) subcommands; appends to `~/.local/state/netwatch/events.jsonl` |
+| `netwatch` | `~/.local/bin/netwatch` | The `probe` (300 s), `speed` (daily 04:00) and `lan-speed` (daily 04:10, iperf3 Mac↔NAS; client on the NAS in `LAN_PEER_MODE=peer`) subcommands; appends to `~/.local/state/netwatch/events.jsonl` |
 | `flapwatch` | `~/.local/bin/flapwatch` | Not scheduled by any launchd job |
 | `check_link.sh` | `~/netwatch/check_link.sh` | Not scheduled by any launchd job |
 | `probe_icmp_vs_tcp.py` | `~/netwatch/probe_icmp_vs_tcp.py` | Diagnostic |
@@ -43,6 +43,7 @@ more. This is the case for co-location, recorded as it happens:
 | 2026-09-20 02:16 | `netwatch` gained `link`, `rx_mbps`, `saturated`, `peer`, `peer_ms`, `peer_loss_pct`, and `saturated` now suppresses latency alarms | Consumer parsing the v2 field set would silently ignore six fields and could alarm on a link the producer considers busy |
 | 2026-09-20 09:13 | `netwatch` gained `RTT_ALERT` (default `off`) and stopped raising `rtt`/`rtt-local` alarms; reporter flag changed `DEGRADED` -> `LOSS` | Contract §5 was missing a config key; §7's decision is now enforced in the producer too |
 | (this repo) | `gwping.py` gained `# iferrs` per §8 | Consumer must know the marker or it counts as drift forever |
+| 2026-10-02 (this repo) | `netwatch` gained `LAN_PEER_MODE`; in `peer` mode the iperf3 client runs on the peer over ssh, server on the Mac | macOS Local Network Privacy had silently denied the locally-run iperf3 every LAN peer but the gateway since 2026-09-30, so the daily `lan-speed` job wrote nothing (`EHOSTUNREACH`); peer mode restores the runs. Event shape is unchanged |
 
 `producers/netwatch` was refreshed from the host after the second change; its
 sha256 is now `d728858a…`. `producers/gwping.py` carried the `# iferrs` addition

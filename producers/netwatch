@@ -49,6 +49,16 @@ LAN_PORT=5201            # iperf3 server port on LAN_PEER
 LAN_DURATION=5           # seconds per direction, per LAN run
 LAN_STREAMS=4            # parallel streams; one flow will not fill a gigabit
 IPERF_BIN=""             # path to iperf3; auto-detected if empty
+LAN_PEER_MODE="mac"      # "mac"  = run the iperf3 client here (needs a server on LAN_PEER)
+                         # "peer" = run the client on LAN_PEER over ssh (needs a server here).
+                         #   Use "peer" on macOS: Local Network Privacy blocks a local,
+                         #   non-Apple iperf3 from reaching LAN peers -> EHOSTUNREACH.
+LAN_SSH=""               # peer mode: ssh target, BatchMode/key auth, e.g. nick@192.168.1.2
+LAN_SSH_PORT=22          # peer mode: ssh port
+LAN_PEER_IPERF="iperf3"  # peer mode: how to invoke iperf3 there,
+                         #   e.g. "sudo docker exec iperf3 iperf3"
+LAN_BIND=""              # peer mode: address to bind the local server to; default = the
+                         #   LAN IP of the interface that routes to LAN_PEER
 NTFY_TOPIC=""             # e.g. "nick-netwatch-9f3a" -> phone push via ntfy.sh
 ALERT_COOLDOWN=3600       # seconds between repeat alerts of the same kind
 NOTIFY_MACOS=true         # also show a desktop notification
@@ -65,6 +75,15 @@ gw_ip() {
 }
 
 iface() { route -n get default 2>/dev/null | awk '/interface/{print $2; exit}'; }
+
+# This Mac's own address on the interface that routes to $1 — the LAN IP the peer
+# connects back to in peer mode. Falls back to the default-route interface.
+lan_ip_towards() {
+  local dev
+  dev=$(route -n get "$1" 2>/dev/null | awk '/interface/{print $2; exit}')
+  [ -n "$dev" ] || dev=$(iface)
+  ipconfig getifaddr "$dev" 2>/dev/null
+}
 
 # --- alerting -------------------------------------------------------------
 # alert <kind> <title> <message>
@@ -112,6 +131,18 @@ find_speedtest() {
 # Directions are named from *this Mac's* point of view:
 #   up   = this Mac sends   (iperf3 default)
 #   down = this Mac receives (iperf3 -R)
+#
+# Two ways to run it, because the client half is what macOS gates:
+#   LAN_PEER_MODE=mac   the iperf3 client runs here and LAN_PEER runs the server.
+#   LAN_PEER_MODE=peer  the client runs on LAN_PEER, invoked over ssh, against a
+#                       server started here. This exists because macOS *Local
+#                       Network Privacy* denies a locally-run, non-Apple iperf3
+#                       any connection to a LAN peer other than the default
+#                       gateway (EHOSTUNREACH, "No route to host"), while the
+#                       Apple ssh client and inbound connections are exempt. The
+#                       peer (Linux) has no such restriction. The direction
+#                       names above are unchanged either way: whichever end is
+#                       this Mac, "up" is still its egress and "down" its ingress.
 find_iperf() {
   [ -n "$IPERF_BIN" ] && [ -x "$IPERF_BIN" ] && { echo "$IPERF_BIN"; return; }
   for c in /opt/homebrew/bin/iperf3 /usr/local/bin/iperf3 "$(command -v iperf3 2>/dev/null)"; do
@@ -157,13 +188,82 @@ iperf_dir() {  # <bin> <peer> <sum_sent|sum_received> [extra iperf3 args...]
   return 1
 }
 
-cmd_lan_speed() {
-  local peer bin up dl
-  peer="${LAN_PEER:-$NET_PEER}"
-  case "$peer" in
-    ""|none|off|no) log "lan-speed: no LAN_PEER/NET_PEER set"
-      echo "lan-speed: no peer configured" >&2; return 1 ;;
-  esac
+# One direction of the LAN test with a single retry, the client running on the
+# peer over ssh (peer mode). Same retry reasoning as iperf_dir above: a blank
+# figure is retried once, a real failure exhausts both attempts. $LAN_PEER_IPERF
+# is the peer's own way of running iperf3 (e.g. "sudo docker exec iperf3 iperf3"),
+# so the peer needs no iperf3 on its PATH. The remote command is one string parsed
+# by the peer's shell, so $extra is meant to split there, not here. Echoes the
+# Mbps on success and nothing on failure.
+peer_iperf_dir() {  # <mac_ip> <sum_sent|sum_received> [extra iperf3 args...]
+  local macip="$1" sum="$2" attempt js mbps extra
+  shift 2
+  extra="$*"
+  for attempt in 1 2; do
+    js=$(ssh -p "$LAN_SSH_PORT" -o BatchMode=yes -o ConnectTimeout=8 "$LAN_SSH" \
+      "$LAN_PEER_IPERF -c $macip -p $LAN_PORT -t $LAN_DURATION -P $LAN_STREAMS $extra -J" \
+      2>/dev/null) || js=""
+    mbps=$(printf '%s' "$js" | iperf_mbps "$sum")
+    if [ -n "$mbps" ]; then printf '%s' "$mbps"; return 0; fi
+    [ "$attempt" = 1 ] && sleep 1
+  done
+  return 1
+}
+
+# Peer mode: the client runs on LAN_PEER and this Mac runs the server — the
+# reverse of mac mode, for the macOS Local Network Privacy case (see the top of
+# this section). This Mac's iperf3 *server* is unaffected by that gate: it is on
+# outbound connections, and the peer initiates here.
+lan_speed_peer_mode() {
+  local peer="$1" bin macip up dl srv i
+  if [ -z "$LAN_SSH" ]; then
+    log "lan-speed: LAN_PEER_MODE=peer but LAN_SSH is empty"
+    echo "lan-speed: LAN_PEER_MODE=peer needs LAN_SSH (ssh target)" >&2; return 1
+  fi
+  bin=$(find_iperf)
+  if [ -z "$bin" ]; then
+    log "lan-speed: no local iperf3 to run the peer-mode server"
+    echo "no iperf3 found (server side)" >&2; return 1
+  fi
+  macip="${LAN_BIND:-$(lan_ip_towards "$peer")}"
+  if [ -z "$macip" ]; then
+    log "lan-speed: could not determine this host's LAN IP towards $peer"
+    echo "lan-speed: no local LAN IP towards $peer" >&2; return 1
+  fi
+
+  # Server here, bound to the LAN IP the peer will reach. Inbound is not gated.
+  "$bin" -s -p "$LAN_PORT" -B "$macip" >/dev/null 2>&1 &
+  srv=$!
+  for i in $(seq 1 25); do
+    lsof -nP -iTCP:"$LAN_PORT" -sTCP:LISTEN >/dev/null 2>&1 && break
+    kill -0 "$srv" 2>/dev/null || break
+    sleep 0.2
+  done
+
+  # The peer is the client, so its default run is the peer sending -> this Mac
+  # receives ("down"); -R makes this Mac the sender ("up"). Same direction names
+  # as mac mode, read off the side this Mac is on.
+  dl=$(peer_iperf_dir "$macip" sum_received)
+  # A brief settle so the server is idle before the reverse test starts.
+  sleep 1
+  up=$(peer_iperf_dir "$macip" sum_sent -R)
+
+  kill "$srv" 2>/dev/null
+
+  if [ -z "$up" ] || [ -z "$dl" ]; then
+    log "lan-speed: peer-mode iperf3 returned no throughput (up='${up}' down='${dl}')"
+    echo "iperf3 returned no throughput (peer mode: is $LAN_SSH reachable and able to run iperf3?)" >&2
+    return 1
+  fi
+  emit "\"kind\":\"lan_speed\",\"peer\":\"$peer\",\"dl_mbps\":$dl,\"ul_mbps\":$up"
+  log "lan-speed peer=$peer dl=${dl}Mbps ul=${up}Mbps mode=peer"
+  echo "LAN ${peer}  DL ${dl} Mbps  UL ${up} Mbps"
+}
+
+# Mac mode (default, the original): the iperf3 client runs here and the server on
+# the peer. Needs a reachable server on LAN_PEER:$LAN_PORT.
+lan_speed_mac_mode() {
+  local peer="$1" bin up dl
   bin=$(find_iperf)
   if [ -z "$bin" ]; then
     log "lan-speed: no iperf3 found"; echo "no iperf3 found" >&2; return 1
@@ -186,8 +286,23 @@ cmd_lan_speed() {
   fi
 
   emit "\"kind\":\"lan_speed\",\"peer\":\"$peer\",\"dl_mbps\":$dl,\"ul_mbps\":$up"
-  log "lan-speed peer=$peer dl=${dl}Mbps ul=${up}Mbps"
+  log "lan-speed peer=$peer dl=${dl}Mbps ul=${up}Mbps mode=mac"
   echo "LAN ${peer}  DL ${dl} Mbps  UL ${up} Mbps"
+}
+
+cmd_lan_speed() {
+  local peer
+  peer="${LAN_PEER:-$NET_PEER}"
+  case "$peer" in
+    ""|none|off|no) log "lan-speed: no LAN_PEER/NET_PEER set"
+      echo "lan-speed: no peer configured" >&2; return 1 ;;
+  esac
+  case "${LAN_PEER_MODE:-mac}" in
+    mac)  lan_speed_mac_mode  "$peer" ;;
+    peer) lan_speed_peer_mode "$peer" ;;
+    *) log "lan-speed: unknown LAN_PEER_MODE='$LAN_PEER_MODE'"
+       echo "lan-speed: unknown LAN_PEER_MODE='$LAN_PEER_MODE'" >&2; return 1 ;;
+  esac
 }
 
 # --- probe ----------------------------------------------------------------

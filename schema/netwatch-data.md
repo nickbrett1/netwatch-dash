@@ -77,7 +77,15 @@ cable or a failing switch port caps the LAN while the WAN test still reads
 healthy.
 
 Directions are named from the **Mac's** point of view: `ul_mbps` is what the Mac
-sends (iperf3 default), `dl_mbps` is what it receives (`iperf3 -R`).
+sends (iperf3 default), `dl_mbps` is what it receives (`iperf3 -R`). Either end
+can be the iperf3 client and the names do not change with it.
+
+`LAN_PEER_MODE=mac` (the default) runs the client on the Mac against a server on
+the peer. `LAN_PEER_MODE=peer` runs the client on the peer over ssh against a
+server the Mac starts for the test — added 2026-10-02 because macOS **Local
+Network Privacy** denies a locally-run, non-Apple iperf3 any connection to a LAN
+peer other than the default gateway (EHOSTUNREACH, "No route to host"), while the
+Apple ssh client and inbound connections are exempt.
 
 Rules the producer holds, and the consumer relies on:
 
@@ -166,9 +174,10 @@ host sets it and the dashboard invents no default — an absent key is reported 
 absent (schema §6) and simply skips that comparison.
 
 The LAN test's own keys (`LAN_PEER`, `LAN_PORT`, `LAN_DURATION`, `LAN_STREAMS`,
-`IPERF_BIN`) live in the same producer config file and are read only by
-`netwatch lan-speed`; none of them is in the dashboard's whitelist, so the
-dashboard neither reads nor reports them.
+`IPERF_BIN`, and in peer mode `LAN_PEER_MODE`, `LAN_SSH`, `LAN_SSH_PORT`,
+`LAN_PEER_IPERF`, `LAN_BIND`) live in the same producer config file and are read
+only by `netwatch lan-speed`; none of them is in the dashboard's whitelist, so
+the dashboard neither reads nor reports them.
 
 `RTT_ALERT` arrived on 2026-09-20 with the decision to stop treating gateway
 ICMP as a health signal (§7); the producer defaults it to `off`, so it logs RTT
