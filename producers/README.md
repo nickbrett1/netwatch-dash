@@ -44,6 +44,7 @@ more. This is the case for co-location, recorded as it happens:
 | 2026-09-20 09:13 | `netwatch` gained `RTT_ALERT` (default `off`) and stopped raising `rtt`/`rtt-local` alarms; reporter flag changed `DEGRADED` -> `LOSS` | Contract §5 was missing a config key; §7's decision is now enforced in the producer too |
 | (this repo) | `gwping.py` gained `# iferrs` per §8 | Consumer must know the marker or it counts as drift forever |
 | 2026-10-02 (this repo) | `netwatch` gained `LAN_PEER_MODE`; in `peer` mode the iperf3 client runs on the peer over ssh, server on the Mac | macOS Local Network Privacy had silently denied the locally-run iperf3 every LAN peer but the gateway since 2026-09-30, so the daily `lan-speed` job wrote nothing (`EHOSTUNREACH`); peer mode restores the runs. Event shape is unchanged |
+| 2026-10-04 (this repo) | `netwatch speed` gained server selection + retry (`SPEEDTEST_SERVER_IDS`, `SPEEDTEST_RETRY_LOW`, `SPEEDTEST_MAX_RUNS`), and a `speed` run below `DL/UL_WARN_MBPS` is confirmed on a different server | The daily run auto-selected one New York Ookla server that read ~150 Mbps up while the link was fine (every other server read ~540, and the LAN test read 913/893): a single degraded test server could set the dashboard to `warn`. The `speed` event shape is unchanged — it still names the one server its numbers came from |
 
 `producers/netwatch` was refreshed from the host after the second change; its
 sha256 is now `d728858a…`. `producers/gwping.py` carried the `# iferrs` addition

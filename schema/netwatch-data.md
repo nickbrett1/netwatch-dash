@@ -179,6 +179,13 @@ The LAN test's own keys (`LAN_PEER`, `LAN_PORT`, `LAN_DURATION`, `LAN_STREAMS`,
 only by `netwatch lan-speed`; none of them is in the dashboard's whitelist, so
 the dashboard neither reads nor reports them.
 
+The WAN speed test's own keys (`SPEEDTEST_BIN`, `SPEEDTEST_SERVER_IDS`,
+`SPEEDTEST_RETRY_LOW`, `SPEEDTEST_MAX_RUNS`, added 2026-10-04) live there too and
+are read only by `netwatch speed`; like the LAN keys they are outside the
+whitelist. They change *which* Ookla server is measured and how many confirm
+runs are spent, never the event's shape: a `kind: "speed"` record is unchanged,
+and still names the single server its numbers came from.
+
 `RTT_ALERT` arrived on 2026-09-20 with the decision to stop treating gateway
 ICMP as a health signal (§7); the producer defaults it to `off`, so it logs RTT
 to `events.jsonl` but raises no `rtt`/`rtt-local` alarm. Reading it lets

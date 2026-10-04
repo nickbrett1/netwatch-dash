@@ -44,6 +44,12 @@ SAT_LOAD=""               # optional: 1-min load avg >= this also counts as "bus
 DL_WARN_MBPS=250          # WAN download below this = alert
 UL_WARN_MBPS=250          # WAN upload below this = alert
 SPEEDTEST_BIN=""          # path to Ookla CLI; auto-detected if empty
+SPEEDTEST_SERVER_IDS=""   # Ookla server IDs to try first, in order (space/comma
+                          # separated, e.g. "36817 30411"); empty = Ookla's own
+                          # pick, retried on the nearest servers if it reads low
+SPEEDTEST_RETRY_LOW=on    # a run below DL/UL_WARN_MBPS is confirmed on another
+                          # server, and the better reading is the one kept
+SPEEDTEST_MAX_RUNS=3      # hard cap on speedtest runs per `netwatch speed`
 LAN_PEER=""              # far end of the daily LAN test; empty = use NET_PEER (the NAS)
 LAN_PORT=5201            # iperf3 server port on LAN_PEER
 LAN_DURATION=5           # seconds per direction, per LAN run
@@ -419,28 +425,114 @@ cmd_probe() {
 }
 
 # --- speedtest ------------------------------------------------------------
-cmd_speed() {
-  local st js dl ul ping srv
-  st=$(find_speedtest)
-  if [ -z "$st" ]; then log "speed: no Ookla CLI found"; echo "no Ookla CLI found" >&2; return 1; fi
-  js=$("$st" -f json 2>/dev/null) || { log "speed: speedtest failed"; return 1; }
-  read -r dl ul ping srv < <(printf '%s' "$js" | python3 -c '
+# A throughput reading is only as good as the server it came from, and Ookla's
+# auto-selection is not stable. On 2026-10-02 and 2026-10-04 the daily run
+# landed on one New York server whose upload side read ~150 Mbps while every
+# other server read ~540; the link itself was fine (a hand re-run minutes later
+# gave 509/562, and the Mac<->NAS iperf3 read 913/893 in the same window). A
+# single degraded test server must not colour the dashboard, so a reading below
+# the warn threshold is confirmed against a different server and the better run
+# wins. The emitted event is unchanged: it still names the one server whose
+# numbers it carries.
+#
+#   SPEEDTEST_SERVER_IDS=""   server IDs to try first, in order (space/comma
+#                             separated); empty = Ookla's own pick, then the
+#                             nearest servers
+#   SPEEDTEST_RETRY_LOW=on    confirm a below-threshold run on another server
+#   SPEEDTEST_MAX_RUNS=3      hard cap on runs per invocation
+
+# The nearest server IDs, closest first, from `speedtest -L`.
+speedtest_servers() {  # <bin>
+  "$1" -L 2>/dev/null | awk '$1 ~ /^[0-9]+$/ {print $1}'
+}
+
+# One run. Prints "<dl> <ul> <ping> <server-id> <server-json>" or returns non-zero.
+speedtest_run() {  # <bin> [<server-id>]
+  local js
+  if [ -n "${2:-}" ]; then js=$("$1" -s "$2" -f json 2>/dev/null)
+  else js=$("$1" -f json 2>/dev/null); fi
+  [ -n "$js" ] || return 1
+  printf '%s' "$js" | python3 -c '
 import json,sys
 d=json.load(sys.stdin)
 print(round(d["download"]["bandwidth"]*8/1e6,1),
       round(d["upload"]["bandwidth"]*8/1e6,1),
       round(d["ping"]["latency"],1),
-      json.dumps(d["server"]["name"]+" "+d["server"]["location"]))')
-  emit "\"kind\":\"speed\",\"dl_mbps\":$dl,\"ul_mbps\":$ul,\"ping_ms\":$ping,\"server\":$srv"
-  log "speed dl=${dl}Mbps ul=${ul}Mbps ping=${ping}ms srv=$srv"
+      d["server"].get("id",""),
+      json.dumps(d["server"]["name"]+" "+d["server"]["location"]))'
+}
 
-  if awk -v d="$dl" -v t="$DL_WARN_MBPS" 'BEGIN{exit !(d<t)}'; then
-    alert "dl" "WAN downlink low" "Download ${dl} Mbps (<${DL_WARN_MBPS}) via $srv"
+# A reading is low if either direction is below its threshold; a missing
+# threshold skips that direction (never a comparison against zero).
+speedtest_low() {  # <dl> <ul>
+  if [ -n "$DL_WARN_MBPS" ] && awk -v x="$1" -v t="$DL_WARN_MBPS" 'BEGIN{exit !(x<t)}'; then return 0; fi
+  if [ -n "$UL_WARN_MBPS" ] && awk -v x="$2" -v t="$UL_WARN_MBPS" 'BEGIN{exit !(x<t)}'; then return 0; fi
+  return 1
+}
+
+# Is <dl> <ul> a better reading than <dl2> <ul2>? Judged on the weaker
+# direction, so a run with a fine download and a bad upload cannot win on the
+# strength of the direction that was never in doubt.
+speedtest_better() {  # <dl> <ul> <dl2> <ul2>
+  awk -v a1="$1" -v a2="$2" -v b1="$3" -v b2="$4" \
+    'BEGIN{amin=a1<a2?a1:a2; bmin=b1<b2?b1:b2; exit !(amin>bmin)}'
+}
+
+cmd_speed() {
+  local st ids cand want dl ul ping sid srv used n maxruns best_dl best_ul best_ping best_srv
+  st=$(find_speedtest)
+  if [ -z "$st" ]; then log "speed: no Ookla CLI found"; echo "no Ookla CLI found" >&2; return 1; fi
+
+  maxruns=${SPEEDTEST_MAX_RUNS:-3}
+  case "$maxruns" in ''|*[!0-9]*|0) maxruns=1 ;; esac
+  case "${SPEEDTEST_RETRY_LOW:-on}" in off|no|false|0) maxruns=1 ;; esac
+
+  # What to try, in order. Configured servers win; with none configured the
+  # first run is Ookla's own pick and the rest are the nearest servers, which is
+  # where a retry lands when that pick is a bad one.
+  ids=$(printf '%s' "${SPEEDTEST_SERVER_IDS:-auto}" | tr ',\t' '  ')
+  cand="$ids"
+  case " $ids " in
+    *" auto "*)
+      # No configured servers: Ookla picks the first, and the other attempts
+      # (only worth asking for when retries are enabled at all) fall back to the
+      # nearest servers — which is where a retry lands when auto picks badly.
+      if [ "$maxruns" -gt 1 ]; then
+        cand="auto $(speedtest_servers "$st" | head -n $((maxruns - 1)) | tr '\n' ' ')"
+      fi ;;
+  esac
+
+  used=" "; n=0; best_dl=""; best_ul=""; best_ping=""; best_srv=""
+  for want in $cand; do
+    [ "$n" -lt "$maxruns" ] || break
+    case "$used" in *" $want "*) continue ;; esac
+    n=$((n + 1))
+    [ "$want" = auto ] && want=""
+    if ! read -r dl ul ping sid srv < <(speedtest_run "$st" "$want"); then
+      log "speed: run ${n} failed"; continue
+    fi
+    used="$used${want:-$sid} "
+    log "speed run ${n}: dl=${dl}Mbps ul=${ul}Mbps ping=${ping}ms srv=$srv"
+    if [ -z "$best_dl" ] || speedtest_better "$dl" "$ul" "$best_dl" "$best_ul"; then
+      best_dl=$dl; best_ul=$ul; best_ping=$ping; best_srv=$srv
+    fi
+    speedtest_low "$dl" "$ul" || break   # healthy: no reason to spend another run
+  done
+
+  if [ -z "$best_dl" ]; then
+    log "speed: speedtest failed"; echo "speedtest failed" >&2; return 1
   fi
-  if awk -v u="$ul" -v t="$UL_WARN_MBPS" 'BEGIN{exit !(u<t)}'; then
-    alert "ul" "WAN uplink low" "Upload ${ul} Mbps (<${UL_WARN_MBPS}) via $srv"
+
+  emit "\"kind\":\"speed\",\"dl_mbps\":$best_dl,\"ul_mbps\":$best_ul,\"ping_ms\":$best_ping,\"server\":$best_srv"
+  log "speed dl=${best_dl}Mbps ul=${best_ul}Mbps ping=${best_ping}ms srv=$best_srv"
+
+  if [ -n "$DL_WARN_MBPS" ] && awk -v d="$best_dl" -v t="$DL_WARN_MBPS" 'BEGIN{exit !(d<t)}'; then
+    alert "dl" "WAN downlink low" "Download ${best_dl} Mbps (<${DL_WARN_MBPS}) via $best_srv"
   fi
-  echo "DL ${dl} Mbps  UL ${ul} Mbps  ping ${ping} ms  ($srv)"
+  if [ -n "$UL_WARN_MBPS" ] && awk -v u="$best_ul" -v t="$UL_WARN_MBPS" 'BEGIN{exit !(u<t)}'; then
+    alert "ul" "WAN uplink low" "Upload ${best_ul} Mbps (<${UL_WARN_MBPS}) via $best_srv"
+  fi
+  echo "DL ${best_dl} Mbps  UL ${best_ul} Mbps  ping ${best_ping} ms  ($best_srv)"
 }
 
 # --- reporting ------------------------------------------------------------
