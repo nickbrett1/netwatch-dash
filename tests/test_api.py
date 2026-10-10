@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from netwatch_dash import events, snapshot
 from netwatch_dash.app import create_app, healthz_body
+from netwatch_dash.runner import ACTION_HEADER, ACTION_HEADER_VALUE, CHECKS, Runner
 from netwatch_dash.settings import Settings
 
 FIX = Path(__file__).parent / "fixtures"
@@ -454,3 +455,74 @@ def test_healthz_reports_the_drift_count_and_the_status(tmp_path):
     assert body["data"]["drift"]["events.jsonl"]["unknown_fields"] == ["brand_new"]
     assert body["data"]["drift"]["gateway_rtt.csv"]["count"] == 0
     assert body["sources"]["events"]["lines"] == 1
+
+
+# --------------------------------------------------------- re-running a check
+#
+# The one action on the surface. These tests never shell out: the runner is
+# injected with a fake command, so they assert the *contract* (who may start a
+# run, which job, how often) without a Mac in the loop.
+
+def rerun_client(tmp_path, calls=None):
+    """A client whose runner records the labels it was asked to start."""
+    calls = calls if calls is not None else []
+    app = create_app(make_settings(tmp_path, events_text=fixture_events()))
+    app.state.runner = Runner(run=lambda label: (calls.append(label) or True, f"ran {label}"))
+    return TestClient(app), calls
+
+
+def test_rerun_needs_the_header_a_cross_origin_page_cannot_set(tmp_path):
+    client, calls = rerun_client(tmp_path)
+
+    response = client.post("/api/rerun/speed")
+
+    assert response.status_code == 403
+    assert ACTION_HEADER in response.json()["detail"]
+    assert calls == []  # refused before launchctl was ever consulted
+
+
+def test_rerun_refuses_an_unknown_check_even_with_the_header(tmp_path):
+    client, calls = rerun_client(tmp_path)
+
+    response = client.post(
+        "/api/rerun/com.nickbrett.netwatch.evil",
+        headers={ACTION_HEADER: ACTION_HEADER_VALUE},
+    )
+
+    assert response.status_code == 404
+    assert calls == []  # the label table is fixed, never taken from the request
+
+
+def test_rerun_starts_the_named_job_through_the_injected_runner(tmp_path):
+    client, calls = rerun_client(tmp_path)
+
+    response = client.post(
+        "/api/rerun/lan-speed", headers={ACTION_HEADER: ACTION_HEADER_VALUE}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["started"] is True
+    assert body["label"] == CHECKS["lan-speed"]
+    assert calls == [CHECKS["lan-speed"]]
+
+
+def test_rerun_is_rate_limited_per_check(tmp_path):
+    client, calls = rerun_client(tmp_path)
+    headers = {ACTION_HEADER: ACTION_HEADER_VALUE}
+
+    assert client.post("/api/rerun/speed", headers=headers).json()["started"] is True
+    second = client.post("/api/rerun/speed", headers=headers).json()
+
+    assert second["started"] is False
+    assert second["retry_after_s"] > 0
+    assert calls == [CHECKS["speed"]]  # the cooldown stopped the second launchctl
+    # A different check has its own cooldown, so it is not blocked by the first.
+    assert client.post("/api/rerun/lan-speed", headers=headers).json()["started"] is True
+
+
+def test_rerun_is_a_post_so_a_stray_get_cannot_start_a_run(tmp_path):
+    client, calls = rerun_client(tmp_path)
+
+    assert client.get("/api/rerun/speed").status_code == 405
+    assert calls == []

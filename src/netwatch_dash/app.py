@@ -4,6 +4,13 @@ Read-only, and deliberately narrow. It answers what the release is responsible
 for (`/healthz`) and what the producers wrote (the `/api/…` endpoints), and it
 computes no alerts and sends none (memo v3 D5) — alerting stays `netwatch`'s job.
 
+There is exactly one exception, and it is a *request* rather than a computation:
+`POST /api/rerun/{check}` asks launchd to re-run one of the two daily bandwidth
+checks now (see `runner.py`). It runs no producer itself — it starts the same
+job the 04:00 schedule starts — and it is fenced to a fixed pair of jobs, a
+header a cross-origin page cannot set, and a per-check cooldown. Everything else
+here reads.
+
 Three rules hold across every endpoint:
 
 * **Never raise over a file.** A missing, empty or malformed file is a reported
@@ -23,11 +30,12 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse
 
 from . import buildinfo, csvrollup, snapshot
 from .landing import LANDING_HTML
+from .runner import ACTION_HEADER, ACTION_HEADER_VALUE, CHECKS, Runner
 from .settings import PROJECT, Settings
 
 # How many records a collection endpoint returns when nobody asked for a number.
@@ -107,6 +115,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # One tailer for the process, not one per request: the cursor is the whole
     # reason the csv is affordable (schema §3).
     app.state.csv = csvrollup.RollupCache(app.state.settings.csv_tail_bytes)
+    # The cooldown lives on the instance, so it is per-process and resets when the
+    # dashboard restarts. That is the right scope: it exists to stop a burst of
+    # clicks saturating the link, not to enforce a schedule.
+    app.state.runner = Runner()
 
     def snap(now: datetime | None = None) -> snapshot.Snapshot:
         return snapshot.build_with_csv(app.state.settings, app.state.csv, now)
@@ -149,6 +161,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         for two links.
         """
         return snap().collection("lan_speed", limit)
+
+    @app.post("/api/rerun/{check}")
+    def api_rerun(
+        check: str, x_netwatch_rerun: str | None = Header(default=None)
+    ) -> dict:
+        """Ask the host to re-run a daily bandwidth check now.
+
+        `check` is one of the fixed pair in `runner.CHECKS` (`speed`,
+        `lan-speed`) — never a job label, so the request cannot name a job the
+        table does not. The action runs through launchd (§ runner.py), so what it
+        starts is the same job the 04:00 schedule runs and the event it writes is
+        indistinguishable from a scheduled run's.
+
+        The header is a CSRF fence, not authentication: a cross-origin form
+        cannot set a custom header without a preflight this app never answers.
+        Unknown check and missing header are both client errors; the run itself
+        reports its own failure in the body rather than by raising, so "the job
+        is not loaded here" reads as a sentence, not a 500.
+        """
+        if check not in CHECKS:
+            raise HTTPException(
+                status_code=404,
+                detail=f"no such check {check!r}; try {', '.join(sorted(CHECKS))}",
+            )
+        if x_netwatch_rerun != ACTION_HEADER_VALUE:
+            raise HTTPException(
+                status_code=403, detail=f"missing the {ACTION_HEADER} header"
+            )
+        return app.state.runner.rerun(check)
 
     @app.get("/api/link")
     def api_link() -> dict:

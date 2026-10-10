@@ -6,6 +6,13 @@ alerts and sends none (memo v3 D5); alerting stays `netwatch`'s job. It is a
 authentication (memo v3 §3) — so the bind address is the whole of the access
 control and the code never becomes a way to reach something the tailnet cannot.
 
+The one thing that is not a read is `POST /api/rerun/{check}`: it asks launchd to
+re-run one of the two daily bandwidth checks, so a reader who has just changed the
+network does not have to wait until 04:00 to see the effect. It runs no producer
+itself — it starts the same launchd job the schedule starts — and is fenced to a
+fixed pair of jobs, a header a cross-origin page cannot set, and a per-check
+cooldown (see "Re-running a daily check" below).
+
 ```
 bin/netwatch-dash            exec python/bin/python3.13 -m netwatch_dash
 python -m netwatch_dash      serve (no flags) · --version · --help
@@ -22,6 +29,7 @@ python -m netwatch_dash      serve (no flags) · --version · --help
 | `src/netwatch_dash/snapshot.py` | one read of the live state, and the status that comes out of it |
 | `src/netwatch_dash/events.py` | the bounded tail-reader for `events.jsonl` |
 | `src/netwatch_dash/parse.py` | the tolerant parsers (the data contract, `schema/netwatch-data.md`) |
+| `src/netwatch_dash/runner.py` | re-runs a daily bandwidth check via launchd — the one action on the surface |
 
 `--version` and `--help` deliberately do not import the ASGI stack: the Buildkite
 smoke gate probes them against the assembled payload on the macOS agent, and a
@@ -127,6 +135,57 @@ Five things it says, and why each is shaped the way it is:
 | `/api/link` | `media` history and the `# link_change` markers — renegotiation / bad-cable | 3 |
 | `/api/localise` | which segment is at fault: the csv targets (`gw`/`wire`/`wl`/`net`) with their history (`series` — per minute for the newest six hours, hourly beyond, each row carrying `bucket_s`) and `# iferrs` deltas, with the `reading` verdict **and the fault condition it came from** (§7.1) | 3 |
 | `/api/incidents` | the `# loss` / `# burst_*` markers, `.last_alert`, `.rtt_streak` | 3 |
+
+### `POST /api/rerun/{check}` — the one action
+
+`check` is `speed` or `lan-speed`: the two daily bandwidth checks, named the way
+their sections are. Anything else is a `404`, and the job label is looked up in a
+table in `runner.py` rather than built from the request — an endpoint that could
+name any job would be a way to run anything on the host.
+
+The action does **not** run `netwatch`. It runs
+`launchctl kickstart -k gui/$UID/<label>`, so what it starts is the *same* job the
+04:00 `StartCalendarInterval` starts — same program, same environment
+(`SPEEDTEST_SERVER_IDS`, `LAN_PEER_MODE`, the interpreter the plist pins), same
+logging — and the run it produces is indistinguishable from a scheduled one. This
+is also what `deploy/install-host.sh` already uses to adopt a replaced producer,
+so it is an existing mechanism made reachable, not a new one. `-k` means "kill if
+running, then start", so a click that lands on top of a scheduled run replaces it
+rather than queueing a second.
+
+```json
+{"check": "speed", "label": "com.nickbrett.netwatch.speed", "started": true,
+ "detail": "launchctl kickstart gui/501/com.nickbrett.netwatch.speed",
+ "cooldown_s": 120.0}
+```
+
+A refusal for any reason is the same shape with `started: false` and a `reason`
+sentence — no `launchctl` on the host, the job not loaded, a timeout:
+
+```json
+{"check": "lan-speed", "label": "com.nickbrett.netwatch.lan-speed",
+ "started": false, "reason": "launchctl kickstart gui/501/… failed: Could not find service …",
+ "detail": "…", "cooldown_s": 120.0}
+```
+
+Three fences, because this is the only write on an unauthenticated surface:
+
+- **A fixed job table**, never assembled from the request (above).
+- **A required header**, `X-Netwatch-Rerun: 1`. A `403` without it. A cross-origin
+  form cannot set a custom header without a CORS preflight, which this app never
+  answers, so a page the reader merely visited cannot start a bandwidth test
+  behind their back. It is a CSRF fence, not authentication; the bind address is
+  still the whole of the access control.
+- **A per-check cooldown**, 120 s by default, held in the process. A bandwidth
+  test saturates the link it is measuring, so a retry loop would corrupt the very
+  numbers the button exists to refresh. A second call inside the window is
+  refused with `retry_after_s`; the two checks are limited independently. The
+  cooldown is recorded on the *attempt*, so a job that is not loaded says so once
+  rather than inviting a click loop.
+
+The cooldown resets when the dashboard restarts, which is the right scope: it
+exists to stop a burst of clicks, not to enforce a schedule — the schedule is
+launchd's, and it is untouched.
 
 `/healthz` names the ones that do not exist yet, with the reason, so a missing
 endpoint is a documented absence rather than a 404 to interpret.

@@ -47,6 +47,15 @@ LANDING_HTML = """<!doctype html>
             padding: 16px; }
   h2 { margin: 0 0 12px; font-size: 12px; text-transform: uppercase;
        letter-spacing: .07em; color: var(--dim); font-weight: 600; }
+  .sechead { display: flex; align-items: center; justify-content: space-between;
+             gap: 12px; margin-bottom: 12px; }
+  .sechead h2 { margin: 0; }
+  .run { font: inherit; font-size: 12px; color: #c3c8d2; background: #10131b;
+         border: 1px solid var(--line); border-radius: 6px; padding: 5px 12px;
+         cursor: pointer; white-space: nowrap; }
+  .run:hover:not(:disabled) { border-color: #3b4152; background: #131722; }
+  .run:disabled { opacity: .55; cursor: default; }
+  .runmsg { min-height: 1.3em; margin: 0 0 6px; }
   ul { margin: 0; padding-left: 18px; }
   .muted { color: #6b7280; }
   .small { font-size: 12px; }
@@ -94,13 +103,23 @@ LANDING_HTML = """<!doctype html>
     <div class="facts" id="facts"><span class="muted small">loading…</span></div>
   </section>
   <section>
-    <h2>Daily bandwidth checks (Mbps)</h2>
+    <div class="sechead">
+      <h2>Daily bandwidth checks (Mbps)</h2>
+      <button class="run" data-check="speed"
+        title="Re-run the daily WAN speed test now, via its own launchd job">Run now</button>
+    </div>
+    <p class="muted small runmsg" id="speed-runmsg"></p>
     <div class="legend" id="speed-legend"></div>
     <svg id="speed" viewBox="0 0 1000 240" preserveAspectRatio="none"></svg>
     <p class="muted small" id="speed-note"></p>
   </section>
   <section>
-    <h2>LAN bandwidth — Mac ↔ NAS (Mbps)</h2>
+    <div class="sechead">
+      <h2>LAN bandwidth — Mac ↔ NAS (Mbps)</h2>
+      <button class="run" data-check="lan-speed"
+        title="Re-run the daily Mac↔NAS iperf3 test now, via its own launchd job">Run now</button>
+    </div>
+    <p class="muted small runmsg" id="lan-speed-runmsg"></p>
     <div class="legend" id="lan-legend"></div>
     <svg id="lan" viewBox="0 0 1000 240" preserveAspectRatio="none"></svg>
     <p class="muted small" id="lan-note"></p>
@@ -440,6 +459,77 @@ const modal = document.getElementById("modal");
 modal.addEventListener("click", () => modal.classList.remove("open"));
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") modal.classList.remove("open");
+});
+
+// ------------------------------------------------------------- re-run a check
+
+// The one action on this page: ask the host to re-run a daily bandwidth check
+// now. It goes through the check's own launchd job, so the run it starts is the
+// run the 04:00 schedule starts — same program, same config, same event written.
+// The server owns the cooldown and the CSRF fence; this mirrors the cooldown onto
+// the button so a double-click cannot queue a second run, and nothing more.
+function waitButton(btn, secs) {
+  let left = Math.ceil(secs);
+  if (left <= 0) { btn.disabled = false; btn.textContent = "Run now"; return; }
+  btn.disabled = true;
+  btn.textContent = "wait " + left + "s";
+  const timer = setInterval(() => {
+    left -= 1;
+    if (left <= 0) {
+      clearInterval(timer);
+      btn.disabled = false;
+      btn.textContent = "Run now";
+    } else {
+      btn.textContent = "wait " + left + "s";
+    }
+  }, 1000);
+}
+
+async function rerun(check, btn, msg) {
+  btn.disabled = true;
+  btn.textContent = "starting…";
+  msg.className = "muted small runmsg";
+  msg.textContent = "";
+  let body = null, ok = true;
+  try {
+    const res = await fetch("/api/rerun/" + encodeURIComponent(check), {
+      method: "POST",
+      // The server rejects a request without this header; a cross-origin page
+      // cannot set a custom header without a preflight this app never answers,
+      // so this is the CSRF fence, not decoration.
+      headers: { "X-Netwatch-Rerun": "1" },
+    });
+    ok = res.ok;
+    body = await res.json();
+  } catch (e) {
+    msg.className = "muted small runmsg bad";
+    msg.textContent = "could not reach the dashboard";
+    waitButton(btn, 5);
+    return;
+  }
+  if (!ok) {
+    msg.className = "muted small runmsg bad";
+    msg.textContent = (body && body.detail) || "the request was refused";
+    waitButton(btn, 5);
+    return;
+  }
+  if (body.started) {
+    msg.className = "muted small runmsg good";
+    // The run writes its event when it finishes; a bandwidth run is well under a
+    // minute, so reload once after it should have landed rather than poll.
+    msg.textContent = "run started — the charts reload in a minute";
+    setTimeout(load, 60000);
+  } else {
+    msg.className = "muted small runmsg over";
+    msg.textContent = body.reason || "not started";
+  }
+  waitButton(btn, body.retry_after_s || body.cooldown_s || 120);
+}
+
+document.querySelectorAll("button.run").forEach((btn) => {
+  const check = btn.dataset.check;
+  btn.addEventListener("click", () =>
+    rerun(check, btn, document.getElementById(check + "-runmsg")));
 });
 load();
 </script>
