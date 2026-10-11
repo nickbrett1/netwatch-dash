@@ -11,6 +11,7 @@ from netwatch_dash.parse import (
     derive_status,
     iface_error_deltas,
     media_is_gigabit,
+    media_speed_mbps,
     parse_config,
     parse_csv_line,
     parse_event,
@@ -104,6 +105,36 @@ def test_unknown_marker_and_target_are_counted():
 
 def test_media_unknown_is_not_gigabit():
     assert media_is_gigabit("1000baseT full-duplex flow-control energ") is True
+    assert media_is_gigabit("autoselect") is False
+    assert media_is_gigabit(None) is False
+
+
+def test_media_speed_parses_the_numeric_rate():
+    assert media_speed_mbps("1000baseT full-duplex") == 1000
+    assert media_speed_mbps("2500Base-T full-duplex flow-control") == 2500
+    assert media_speed_mbps("100Base-TX") == 100
+    assert media_speed_mbps("10Base-T") == 10
+    assert media_speed_mbps("autoselect") is None
+    assert media_speed_mbps(None) is None
+
+
+def test_media_at_or_above_gigabit_is_healthy():
+    # >= 1000Base-T is a healthy link. 2500Base-T is a *faster* link-up, not the
+    # renegotiation fault the canary exists to catch — media is not a fixed
+    # format, so the rate must be parsed, not string-matched (schema §2).
+    assert media_is_gigabit("1000Base-T full-duplex") is True
+    assert media_is_gigabit("1000baseT full-duplex flow-control energ") is True
+    assert media_is_gigabit("2500Base-T full-duplex flow-control") is True
+
+
+def test_media_below_gigabit_is_the_fault():
+    assert media_is_gigabit("100Base-TX") is False
+    assert media_is_gigabit("10Base-T") is False
+
+
+def test_unparseable_media_falls_back_to_not_healthy():
+    # Documented fallback (schema §2): a media string that names no rate is not
+    # coerced to "good" — the same rule as a missing value.
     assert media_is_gigabit("autoselect") is False
     assert media_is_gigabit(None) is False
 

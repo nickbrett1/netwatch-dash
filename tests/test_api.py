@@ -107,6 +107,32 @@ def test_ok_when_there_is_no_loss_and_the_link_is_gigabit(tmp_path):
     assert snap.status_inputs()["link_ok"] is True
 
 
+def test_a_2_5g_link_up_is_healthy_not_a_fault(tmp_path):
+    """en0 renegotiating UP to 2500Base-T must not read as a down/crit link."""
+    settings = make_settings(
+        tmp_path,
+        events_text=probe(
+            "2026-09-20T12:49:00Z",
+            media="2500Base-T full-duplex flow-control",
+        ),
+    )
+    snap = snapshot.build(settings, now=at(AFTER_NEWEST))
+
+    assert snap.status_inputs()["link_ok"] is True
+    assert snap.status == "ok"
+
+
+def test_a_100base_tx_link_down_is_crit(tmp_path):
+    settings = make_settings(
+        tmp_path, events_text=probe("2026-09-20T12:49:00Z", media="100Base-TX")
+    )
+    snap = snapshot.build(settings, now=at(AFTER_NEWEST))
+
+    assert snap.status_inputs()["link_ok"] is False
+    assert snap.status == "crit"
+    assert any("below 1000Base-T" in r for r in snap.status_reason())
+
+
 def test_ok_is_still_qualified_by_what_is_not_read(tmp_path):
     """A green light that does not say what it did not look at is the failure mode."""
     settings = make_settings(tmp_path, events_text=fixture_events())
@@ -145,7 +171,7 @@ def test_media_that_is_not_gigabit_is_crit(tmp_path):
 
     assert snap.status_inputs()["link_ok"] is False
     assert snap.status == "crit"
-    assert any("not 1000baseT" in r for r in snap.status_reason())
+    assert any("below 1000Base-T" in r for r in snap.status_reason())
 
 
 def test_absent_media_is_unknown_not_a_fault(tmp_path):

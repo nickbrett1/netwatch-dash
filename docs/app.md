@@ -235,10 +235,12 @@ an empty chart over a full file.
 
 ### Two judgement calls, recorded
 
-- **`link_ok` is three-valued.** `media` saying `1000bas` is `true`; `media`
-  present and saying anything else (including `autoselect`) is `false` and moves
+- **`link_ok` is three-valued.** `media` naming a rate **>= 1000Base-T**
+  (`1000baseT`, `2500Base-T`) is `true`; `media` present and naming a lower or
+  unreadable rate (`100Base-TX`, `10Base-T`, `autoselect`) is `false` and moves
   the status to `crit`, because that is the renegotiation canary (schema §7);
-  `media` absent is `null` — unknown, and it moves nothing.
+  `media` absent is `null` — unknown, and it moves nothing. The rule parses the
+  numeric speed, so a 2.5 Gb link-up is healthy rather than a false fault.
 - **`.rtt_streak` is reported and never passed to the status.** The streak counts
   consecutive over-threshold *gateway* probes, and gateway RTT is not a health
   input (schema §7); the producer's own `RTT_ALERT=off` default says the same.

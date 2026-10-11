@@ -121,12 +121,13 @@ def _read_text(path: Path) -> tuple[str | None, str | None]:
 
 
 def link_ok(probe: dict | None) -> bool | None:
-    """Whether the link is at gigabit, from the probe's `media`.
+    """Whether the link is at or above gigabit, from the probe's `media`.
 
-    Three-valued, because "no media recorded" and "media recorded as something
-    else" are different facts: the first is unknown and the second is the
-    renegotiation canary (schema §2, §7). Absent `media` is never 1000baseT *and*
-    never a fault — it is unknown.
+    Three-valued, because "no media recorded" and "media recorded below
+    gigabit" are different facts: the first is unknown and the second is the
+    renegotiation canary (schema §2, §7). Absent `media` is never healthy *and*
+    never a fault — it is unknown. A rate >= 1000Base-T is healthy; 2500Base-T
+    links up are healthy too.
     """
     media = probe.get("media") if probe else None
     if not isinstance(media, str) or not media:
@@ -373,7 +374,7 @@ class Snapshot:
         link = link_ok(probe)
         if link is False:
             reasons.append(
-                f"link media is {probe.get('media')!r}, which is not 1000baseT"
+                f"link media is {probe.get('media')!r}, which is below 1000Base-T"
             )
         if link is None and probe:
             reasons.append("no `media` recorded on the newest probe: link rate unknown")

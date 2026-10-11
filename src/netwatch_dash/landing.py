@@ -154,11 +154,11 @@ const INFO = {
       "routine; everywhere else, expect zero." },
   link: { title: "Link rate",
     body: "The negotiated rate of the LAN interface, from the newest probe's " +
-      "media and any # link_change markers. Expected is 1000baseT full-duplex. " +
-      "Anything else — a renegotiation down to 100 Mbit, or half-duplex — counts " +
-      "as critical, because it is usually a bad cable or a bad port and it caps " +
-      "every other number on this page. No media recorded reads as unknown, " +
-      "never as good." },
+      "media and any # link_change markers. Expected is 1000Base-T or faster " +
+      "(a 2.5 Gb link-up is healthy). A renegotiation down below a gigabit — " +
+      "100 Mbit, 10 Mbit — counts as critical, because it is usually a bad " +
+      "cable or a bad port and it caps every other number on this page. No " +
+      "media recorded reads as unknown, never as good." },
   down: { title: "Download",
     body: "The most recent daily speed test's download. Warn below " +
       "{dl_warn_mbps}. Throughput is a health signal (schema §7) and only a " +
@@ -289,7 +289,7 @@ function facts(summary, localise, lan) {
            : si.loss_pct > 0 ? "any loss is critical" : "none on the newest probe",
          lossCls, "loss"),
     fact("Link", si.link_ok == null ? "unknown" : (si.link_ok ? "up" : "down"),
-         (localise.host && localise.host.iface) || "expected 1000baseT",
+         (localise.host && localise.host.iface) || "expected \u2265 1000Base-T",
          linkCls, "link"),
     fact("Down", fmt(si.dl_mbps, 1) + " Mbps",
          dww == null ? "no threshold set" : `warn below ${fmt(dww, 0)}`,

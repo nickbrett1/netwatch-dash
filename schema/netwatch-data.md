@@ -57,7 +57,11 @@ Base fields (present since at least 2026-09-13):
 > fields as `unknown`, never as zero, and must **count** unrecognised fields.
 
 `media` is **not a fixed format**. Seen: `1000baseT full-duplex flow-control
-energ…` and `autoselect`. **Unknown is never 1000baseT.**
+energ…`, `2500Base-T full-duplex flow-control`, and `autoselect`. The rate is
+read as the numeric `<n>base…` token, so any `n >= 1000` is healthy — a
+`2500Base-T` link-up is a faster link, not a fault. **Unknown is never coerced
+to a good value**: a `media` string with no readable rate (`autoselect`) is
+treated as not-healthy, not as gigabit.
 
 ### `kind: "speed"`
 ```json
@@ -229,8 +233,13 @@ network (confirmed: an `rtt` alert fired 2026-09-20T12:54Z).
 
 ### Status derivation (revises memo v2 §3.2)
 
-`crit` if loss > 0 on any probe **or** link ≠ 1000baseT **or** forwarded-path RTT
-(`net`/`wire`) **at fault** (§7.1) **or** probe stale **or** en0 errors > 0.
+`crit` if loss > 0 on any probe **or** link rate < 1000Base-T **or**
+forwarded-path RTT (`net`/`wire`) **at fault** (§7.1) **or** probe stale **or**
+en0 errors > 0. Link rate is the numeric speed in `media`: any rate
+**>= 1000Base-T** (1000Base-T, 2500Base-T, …) is healthy; a renegotiation
+**down** to 100Base-TX / 10Base-T is the fault. A `media` string with no
+readable rate (`autoselect`) is likewise a fault — unknown is not coerced to
+healthy — while an *absent* `media` stays unknown and moves nothing (§2, §6).
 `warn` if the forwarded path is at fault but not `crit`, `rtt_streak > 0`, or
 throughput below threshold. **Gateway RTT is not an input.** It is rendered as a
 labelled diagnostic ("router CPU") so the localisation panel still attributes

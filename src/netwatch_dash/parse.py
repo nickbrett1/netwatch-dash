@@ -9,6 +9,7 @@ schema change becomes a visible number instead of a silently missing panel.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 
 PROBE_FIELDS = frozenset(
@@ -248,9 +249,40 @@ def parse_last_alert(text: str) -> dict[str, int]:
     return out
 
 
+_MEDIA_SPEED_RE = re.compile(r"(\d+)\s*base", re.IGNORECASE)
+
+
+def media_speed_mbps(media: object) -> int | None:
+    """The numeric rate a `media` string names, or None if it names none.
+
+    `media` is not a fixed format (schema §2), but every rate it carries is
+    written as `<n>base…`: `1000baseT`, `2500Base-T`, `100Base-TX`, `10Base-T`.
+    The number is the fact; the trailing duplex / flow-control /
+    energy-efficient-ethernet text is decoration. A string with no `<n>base`
+    token — `autoselect`, a bare `active` — has no rate and returns None.
+    """
+    if not isinstance(media, str):
+        return None
+    match = _MEDIA_SPEED_RE.search(media)
+    return int(match.group(1)) if match else None
+
+
 def media_is_gigabit(media: object) -> bool:
-    """Unknown media is NOT gigabit (schema §2). Absent/None -> False."""
-    return isinstance(media, str) and "1000bas" in media.lower()
+    """Whether `media` reports a link at or **above** gigabit.
+
+    The test is the numeric rate >= 1000, not the literal string `1000baseT`:
+    en0 also links up at `2500Base-T full-duplex flow-control`, which is a
+    *faster* link, not the renegotiation fault this canary exists to catch. A
+    rate below 1000 (`100Base-TX`, `10Base-T`) is that fault.
+
+    Fallback: a media string that parses to no rate at all (`autoselect`) is
+    **not** healthy — the same "unknown is never coerced to a good value" rule
+    as a missing field (schema §2), and what keeps an unrecognised format from
+    reading as a clean gigabit link. Absent/None also returns False here;
+    `link_ok` is what turns a *missing* media into the three-valued `None`.
+    """
+    speed = media_speed_mbps(media)
+    return speed is not None and speed >= 1000
 
 
 # The two ways the forwarded path can be at fault, from `path_fault`.
