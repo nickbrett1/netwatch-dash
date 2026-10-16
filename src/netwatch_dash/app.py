@@ -41,7 +41,7 @@ from .settings import PROJECT, Settings
 # How many records a collection endpoint returns when nobody asked for a number.
 PROBE_DEFAULT_LIMIT = 60  # a 5-hour window at the 300 s cadence
 SPEED_DEFAULT_LIMIT = 20  # a few weeks of daily runs
-LAN_SPEED_DEFAULT_LIMIT = 20  # likewise: a few weeks of daily LAN runs
+LAN_SPEED_DEFAULT_LIMIT = 20  # likewise: a few weeks of daily LAN runs, per peer
 
 
 def healthz_body(
@@ -153,12 +153,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def api_lan_speed(
         limit: int = Query(LAN_SPEED_DEFAULT_LIMIT, ge=1, le=1000)
     ) -> dict:
-        """The Mac<->NAS LAN runs: the internal wire's up/down capacity over time.
+        """The Mac<->peer LAN runs, grouped by peer: the internal wire's capacity.
 
         A separate endpoint from `/api/speed` because it is a separate question —
         the WAN runs measure the internet, these measure the switch and cable
         between two boxes we own — and a chart that mixed them would be one axis
         for two links.
+
+        The answer carries both the flat `lan_speeds` list (every run) and
+        `by_peer`: the same records split by the peer they measured, so the page
+        draws one chart per link — Mac↔NAS at ~1 Gb, Mac↔ryzen at ~2.5 Gb — on
+        its own scale rather than two very different capacities on one axis.
         """
         return snap().collection("lan_speed", limit)
 

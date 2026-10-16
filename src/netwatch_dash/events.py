@@ -61,8 +61,11 @@ class EventLog:
     # usable timestamp is not in here — it is in `drift.bad_lines`.
     probes: list[dict] = field(default_factory=list)
     speeds: list[dict] = field(default_factory=list)
-    # The Mac<->NAS LAN throughput runs (`kind:"lan_speed"`), same shape as
-    # `speeds` but a different question: the wire between our own boxes.
+    # The Mac<->peer LAN throughput runs (`kind:"lan_speed"`), same shape as
+    # `speeds` but a different question: the wire between our own boxes. Held
+    # flat and ordered by `ts`; the per-peer grouping is the consumer's job
+    # (`snapshot.Snapshot.lan_peers`), because the reader should not decide how
+    # many peers there are.
     lan_speeds: list[dict] = field(default_factory=list)
     drift: Drift = field(default_factory=Drift)
     lines: int = 0

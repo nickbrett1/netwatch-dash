@@ -68,17 +68,26 @@ treated as not-healthy, not as gigabit.
 {"ts":"<ISO-UTC Z>","kind":"speed","dl_mbps":523.4,"ul_mbps":565.6,"ping_ms":4.9,"server":"Verizon New York, NY"}
 ```
 
-### `kind: "lan_speed"` (added 2026-09-29)
+### `kind: "lan_speed"` (added 2026-09-29; multi-peer 2026-10-16)
 ```json
-{"ts":"<ISO-UTC Z>","kind":"lan_speed","peer":"192.168.1.2","dl_mbps":941.2,"ul_mbps":938.7}
+{"ts":"<ISO-UTC Z>","kind":"lan_speed","peer":"192.168.1.2","peer_name":"nas","dl_mbps":941.2,"ul_mbps":938.7}
 ```
 
-The Mac↔NAS LAN throughput test (`netwatch lan-speed`, daily under launchd).
+The Mac↔peer LAN throughput test (`netwatch lan-speed`, daily under launchd).
 Same down/up shape as `speed`, but the far end is a `peer` we own rather than a
 `server` on the internet: it measures the switch and cable between two boxes,
 which is the one thing a WAN speed test cannot see — a renegotiated link, a bad
 cable or a failing switch port caps the LAN while the WAN test still reads
 healthy.
+
+**One run per peer.** The host names the peers it tests in `LAN_PEERS`
+(`nas ryzen`), and each writes its own record: a 1 Gb NAS and a 2.5 Gb ryzen are
+two different wires, measured and charted apart. `peer` is the address, always
+present. `peer_name` (added 2026-10-16) is the human label from `LAN_PEERS` and
+is **optional** — a host that never set `LAN_PEERS` runs the single
+`LAN_PEER`/`NET_PEER` peer and writes no `peer_name`, so the consumer takes the
+address as the identity. The consumer groups by `peer_name or peer` and heads one
+section per peer.
 
 Directions are named from the **Mac's** point of view: `ul_mbps` is what the Mac
 sends (iperf3 default), `dl_mbps` is what it receives (`iperf3 -R`). Either end
@@ -177,11 +186,22 @@ second one, and the producer ignores it. It is a judgement about a WAN, so the
 host sets it and the dashboard invents no default — an absent key is reported as
 absent (schema §6) and simply skips that comparison.
 
-The LAN test's own keys (`LAN_PEER`, `LAN_PORT`, `LAN_DURATION`, `LAN_STREAMS`,
-`IPERF_BIN`, and in peer mode `LAN_PEER_MODE`, `LAN_SSH`, `LAN_SSH_PORT`,
-`LAN_PEER_IPERF`, `LAN_BIND`) live in the same producer config file and are read
-only by `netwatch lan-speed`; none of them is in the dashboard's whitelist, so
-the dashboard neither reads nor reports them.
+The LAN test's own keys (`LAN_PEERS`, `LAN_PEER`, `LAN_PORT`, `LAN_DURATION`,
+`LAN_STREAMS`, `IPERF_BIN`, and in peer mode `LAN_PEER_MODE`, `LAN_SSH`,
+`LAN_SSH_PORT`, `LAN_PEER_IPERF`, `LAN_BIND`) live in the same producer config
+file and are read only by `netwatch lan-speed`; none of them is in the
+dashboard's whitelist, so the dashboard neither reads nor reports them. With
+`LAN_PEERS` set, a peer named `<p>` may override any of the above as
+`LAN_PEER_<p>_<KEY>`, and its address is `LAN_PEER_<p>` — the label written to
+the event as `peer_name` is the `<p>` token itself.
+
+```sh
+# the NAS on 1 Gb, ryzen on 2.5 Gb, both reached over ssh (peer mode)
+LAN_PEERS="nas ryzen"
+LAN_PEER_nas=192.168.1.2      LAN_PEER_nas_SSH=nick@192.168.1.2
+LAN_PEER_ryzen=192.168.1.69   LAN_PEER_ryzen_SSH=nick@192.168.1.69
+LAN_PEER_MODE=peer
+```
 
 The WAN speed test's own keys (`SPEEDTEST_BIN`, `SPEEDTEST_SERVER_IDS`,
 `SPEEDTEST_RETRY_LOW`, `SPEEDTEST_MAX_RUNS`, added 2026-10-04) live there too and
@@ -225,7 +245,7 @@ network (confirmed: an `rtt` alert fired 2026-09-20T12:54Z).
 | **Link rate** | probe `media` + `# link_change` | 300 s | **Health** — renegotiation / bad-cable canary |
 | **en0 error counters** | *not recorded yet — see §8* | — | **Health (missing)** — the direct hardware answer |
 | **Throughput** | `kind:speed`; optional Mac↔peer iperf3 | daily | **Health** — capacity; the recommended gw-ICMP replacement |
-| **LAN throughput** | `kind:lan_speed` (iperf3, Mac↔NAS) | daily | Context — the internal wire's capacity, reported and charted on the drill-in; deliberately **not** a status input, so it never paints the pill |
+| **LAN throughput** | `kind:lan_speed` (iperf3, Mac↔each LAN peer) | daily | Context — the internal wire's capacity, one run per peer (NAS ~1 Gb, ryzen ~2.5 Gb), reported and charted per peer on the drill-in; deliberately **not** a status input, so it never paints the pill |
 | **Peer RTT** | probe `peer_ms`, `peer_loss_pct` | 300 s | Health, with the caveat that the peer can itself be busy |
 | **Saturation** | probe `rx_mbps` vs `SAT_MBPS`, `saturated` | 300 s | Context; suppresses latency alarms on a busy link |
 | **Router state** | `# orbi` marker | irregular | Context: `internet_text`, satellites, devices |

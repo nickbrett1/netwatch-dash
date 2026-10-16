@@ -47,10 +47,11 @@ NOT_STATUS_INPUTS = (
         "is not a path fault. Reported in /api/localise as evidence instead."
     ),
     (
-        "Mac<->NAS LAN throughput (`kind: lan_speed`): a capacity measurement of "
-        "the wire between our own boxes, reported in /api/lan-speed and drawn on "
-        "the drill-in. It is not a status input — the WAN `speed` run is the one "
-        "§7 lists — so a slow LAN run colours its own tile and nothing else."
+        "LAN throughput (`kind: lan_speed`, one run per peer — NAS, ryzen, …): a "
+        "capacity measurement of the wire between our own boxes, reported per "
+        "peer in /api/lan-speed and drawn on the drill-in. It is not a status "
+        "input — the WAN `speed` run is the one §7 lists — so a slow LAN run "
+        "colours its own tile and nothing else."
     ),
 )
 
@@ -75,9 +76,16 @@ PROBE_FIELDS = (
     "peer_loss_pct",
 )
 SPEED_FIELDS = ("ts", "dl_mbps", "ul_mbps", "ping_ms", "server")
-# The Mac<->NAS LAN test's field set, and nothing else, so a field the producer
-# adds shows up as drift rather than as a silent extra key.
-LAN_SPEED_FIELDS = ("ts", "peer", "dl_mbps", "ul_mbps")
+# The Mac<->peer LAN test's field set, and nothing else, so a field the producer
+# adds shows up as drift rather than as a silent extra key. `peer_name` is the
+# human label ("nas", "ryzen"); it is absent on a single-peer run, so the peer
+# address is the fallback identity.
+LAN_SPEED_FIELDS = ("ts", "peer", "peer_name", "dl_mbps", "ul_mbps")
+
+# How many LAN runs a per-peer group carries in `/api/summary`. The drill-in's
+# chart reads the roomier `/api/lan-speed`; this is only the newest-run-per-peer
+# the Now tiles need, and a bounded number keeps a summary a summary.
+LAN_SUMMARY_RUNS = 20
 
 #: kind -> (the view builder, the record list the bounded tail actually held).
 #: One table so `/api/probe`, `/api/speed` and `/api/lan-speed` cannot disagree
@@ -292,6 +300,59 @@ class Snapshot:
         return [
             self.view(r, LAN_SPEED_FIELDS) for r in self.events.lan_speeds[-limit:]
         ]
+
+    def lan_peers(self, limit: int) -> list[dict]:
+        """The LAN runs grouped by the peer they measured, newest peer first.
+
+        The event carries one run against one peer; the page wants one section
+        per peer (Mac↔NAS, Mac↔ryzen, …), so the grouping is done here rather
+        than in the browser. Identity is `peer_name` when the producer named the
+        peer, else the address — a single-peer config writes only `peer` and
+        still gets a group, keyed by its address, so the page never has to
+        special-case "no name".
+
+        Each group carries every run in the window (oldest first, so the chart
+        draws left-to-right), the newest run on its own, and its age. A group
+        with no runs cannot exist — the peer is what was measured.
+        """
+        records = self.events.lan_speeds[-limit:] if limit > 0 else []
+        groups: dict[str, dict] = {}
+        order: list[str] = []
+        for record in records:
+            key = str(record.get("peer_name") or record.get("peer") or "unknown")
+            group = groups.get(key)
+            if group is None:
+                group = groups[key] = {
+                    "key": key,
+                    "name": record.get("peer_name") or None,
+                    "peer": record.get("peer"),
+                    "runs": [],
+                }
+                order.append(key)
+            group["runs"].append(record)
+            # Later records are newer (the list is ts-ordered), so the last write
+            # wins; a peer whose address changed keeps the newest as its label.
+            group["peer"] = record.get("peer") or group["peer"]
+            group["name"] = record.get("peer_name") or group["name"]
+        out: list[dict] = []
+        for key in order:
+            group = groups[key]
+            newest = group["runs"][-1]
+            out.append(
+                {
+                    "key": key,
+                    # The human label to head a section with; the address when
+                    # the producer did not name the peer.
+                    "name": group["name"] or group["peer"] or key,
+                    "peer": group["peer"],
+                    "newest": self.view(newest, LAN_SPEED_FIELDS),
+                    "age_s": self.age_s(newest),
+                    "runs": [self.view(r, LAN_SPEED_FIELDS) for r in group["runs"]],
+                }
+            )
+        # Newest activity first: the peer measured most recently heads the page.
+        out.sort(key=lambda g: g["newest"].get("ts") or "", reverse=True)
+        return out
 
     # --- the status ---------------------------------------------------------
 
@@ -812,7 +873,11 @@ class Snapshot:
             "now": _iso(self.now),
             "probe": self.view(self.probe, PROBE_FIELDS),
             "speed": self.view(self.speed, SPEED_FIELDS),
+            # The newest LAN run overall (kept for a reader that wants one), and
+            # the per-peer groups the Now tiles and section headings are built
+            # from — one entry per peer, newest activity first.
             "lan_speed": self.view(self.lan_speed, LAN_SPEED_FIELDS),
+            "lan_peers": self.lan_peers(LAN_SUMMARY_RUNS),
             "streak": self.streak,
             "last_alert": self.last_alert,
             "config": self.config,
@@ -843,7 +908,7 @@ class Snapshot:
         builder, held_attr = COLLECTIONS[kind]
         views = getattr(self, builder)(limit)
         held = len(getattr(self.events, held_attr))
-        return {
+        answer = {
             kind + "s": views,
             "returned": len(views),
             # How much the bounded tail actually held: "no data" and "no data in
@@ -855,6 +920,12 @@ class Snapshot:
             "drift": self.events.drift.as_dict(),
             "sources": self.sources(),
         }
+        if kind == "lan_speed":
+            # The flat list is every run; `by_peer` is the same records split by
+            # the peer they measured, so the page can draw one chart per link
+            # without re-grouping in the browser. Both come from one read.
+            answer["by_peer"] = self.lan_peers(limit)
+        return answer
 
 
 def build(

@@ -56,6 +56,19 @@ def test_lan_speed_events_are_recognised():
     assert drift.unknown_kinds == []
 
 
+def test_lan_speed_peer_name_is_recognised():
+    """The multi-peer label is a known field, not drift (added 2026-10-16)."""
+    drift = Drift()
+    rec = parse_event(
+        '{"ts":"2026-10-16T04:10:00Z","kind":"lan_speed","peer":"192.168.1.20",'
+        '"peer_name":"ryzen","dl_mbps":2340.0,"ul_mbps":2351.0}',
+        drift,
+    )
+    assert rec is not None
+    assert drift.unknown_fields == []
+    assert drift.count == 0
+
+
 def test_lan_speed_unknown_field_is_counted_not_dropped():
     """The contract's rule holds for the new kind too: a new field is a number."""
     drift = Drift()

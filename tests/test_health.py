@@ -255,9 +255,10 @@ def test_the_landing_page_is_the_drill_in(tmp_path):
     # other half of "drill in", and live behind a different endpoint.
     assert "/api/speed" in response.text
     # The LAN link is the second bandwidth chart — its own endpoint and its own
-    # axis, so the WAN and the internal wire are never drawn on one scale.
+    # axis, so the WAN and the internal wire are never drawn on one scale. Each
+    # peer (NAS, ryzen, …) gets its own section built from the same endpoint.
     assert "/api/lan-speed" in response.text
-    assert 'id="lan"' in response.text
+    assert 'id="lan-sections"' in response.text
 
 
 def test_the_landing_page_no_longer_draws_the_unread_charts(tmp_path):

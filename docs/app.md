@@ -131,7 +131,7 @@ Five things it says, and why each is shaped the way it is:
 | `/api/summary` | everything below, as one object for the tile — status, its reasons, the inputs it used, the newest probe and speed test, the state files, drift and sources | **2 — built** |
 | `/api/probe` | the most recent `kind: "probe"` events (oldest first), `?limit=` 1–1000 | **2 — built** |
 | `/api/speed` | the most recent `kind: "speed"` events | **2 — built** |
-| `/api/lan-speed` | the most recent `kind: "lan_speed"` events — the daily Mac↔NAS iperf3 runs, charted separately from the WAN runs (one axis per link) | **2 — built** |
+| `/api/lan-speed` | the most recent `kind: "lan_speed"` events — the daily Mac↔peer iperf3 runs, charted separately from the WAN runs and from each other (one axis per link). Carries the flat `lan_speeds` list and `by_peer`, the same records grouped by the peer they measured (`peer_name or peer`), so a 2.5 Gb peer is never drawn on a 1 Gb peer's scale | **2 — built** |
 | `/api/link` | `media` history and the `# link_change` markers — renegotiation / bad-cable | 3 |
 | `/api/localise` | which segment is at fault: the csv targets (`gw`/`wire`/`wl`/`net`) with their history (`series` — per minute for the newest six hours, hourly beyond, each row carrying `bucket_s`) and `# iferrs` deltas, with the `reading` verdict **and the fault condition it came from** (§7.1) | 3 |
 | `/api/incidents` | the `# loss` / `# burst_*` markers, `.last_alert`, `.rtt_streak` | 3 |

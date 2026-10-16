@@ -113,17 +113,7 @@ LANDING_HTML = """<!doctype html>
     <svg id="speed" viewBox="0 0 1000 240" preserveAspectRatio="none"></svg>
     <p class="muted small" id="speed-note"></p>
   </section>
-  <section>
-    <div class="sechead">
-      <h2>LAN bandwidth — Mac ↔ NAS (Mbps)</h2>
-      <button class="run" data-check="lan-speed"
-        title="Re-run the daily Mac↔NAS iperf3 test now, via its own launchd job">Run now</button>
-    </div>
-    <p class="muted small runmsg" id="lan-speed-runmsg"></p>
-    <div class="legend" id="lan-legend"></div>
-    <svg id="lan" viewBox="0 0 1000 240" preserveAspectRatio="none"></svg>
-    <p class="muted small" id="lan-note"></p>
-  </section>
+  <div id="lan-sections"></div>
 </main>
 <script>
 // Long-form definitions, on demand. They are here rather than on the page
@@ -168,18 +158,20 @@ const INFO = {
     body: "The most recent daily speed test's upload. Warn below {ul_warn_mbps}. " +
       "Same rule as download: a stale run is displayed but does not colour the " +
       "status." },
-  landown: { title: "LAN down (NAS → Mac)",
-    body: "Throughput of the daily iperf3 run from the NAS to this Mac, over the " +
-      "wired LAN. This is the internal wire's capacity — the switch and the " +
+  landown: { title: "LAN down (peer → Mac)",
+    body: "Throughput of the daily iperf3 run from a LAN peer to this Mac, over " +
+      "the wired LAN. This is the internal wire's capacity — the switch and the " +
       "cable between two boxes we own — not the internet, so it is a separate " +
-      "measurement from Down/Up above and never moves the status. Expected is " +
-      "close to the link rate; a figure far below it points at the cable, the " +
-      "switch port or a renegotiated link, which is exactly what a WAN speed " +
-      "test cannot see." },
-  lanup: { title: "LAN up (Mac → NAS)",
-    body: "Throughput of the daily iperf3 run from this Mac to the NAS, over the " +
-      "wired LAN. The mirror of LAN down. Reported, not a status input; a " +
-      "stale run is shown but is not evidence about the wire now." },
+      "measurement from Down/Up above and never moves the status. Each peer is " +
+      "charted on its own: the NAS is a gigabit peer (~900 Mbps) while ryzen sits " +
+      "on a 2.5 Gb link (~2,300 Mbps), so the two cannot share one scale. " +
+      "Expected is close to the slower of the two ends' link rate; a figure far " +
+      "below it points at a bad cable, a bad switch port or a renegotiated link, " +
+      "which is exactly what a WAN speed test cannot see." },
+  lanup: { title: "LAN up (Mac → peer)",
+    body: "Throughput of the daily iperf3 run from this Mac to a LAN peer, over " +
+      "the wired LAN. The mirror of LAN down, per peer. Reported, not a status " +
+      "input; a stale run is shown but is not evidence about the wire now." },
   en0: { title: "en0 errors",
     body: "Error counters for the LAN interface — input errors + output errors + " +
       "collisions, from the producer's # iferrs markers (netstat -ib). The " +
@@ -204,6 +196,14 @@ function text(svg, x, y, s, attrs) {
   return t;
 }
 function mmdd(ts) { return ts ? ts.slice(5, 10) : "?"; }
+
+// Peer names and addresses come from the producer's config, so they are data,
+// not literals — everything interpolated into a `.fact` or a section heading is
+// escaped rather than trusted.
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g,
+    c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
 
 // Thresholds as rendered, so the definitions can quote the host's real numbers
 // instead of a number written into this file that nobody will remember to change.
@@ -235,21 +235,19 @@ function ago(s) {
 
 function fact(k, v, hint, cls, metric) {
   const link = metric ? ` link" data-metric="${metric}` : "";
-  return `<div class="fact${link}"><div class="k">${k}</div>
-    <div class="v ${cls || ""}">${v}</div>
-    ${hint ? `<div class="h">${hint}</div>` : ""}</div>`;
+  return `<div class="fact${link}"><div class="k">${esc(k)}</div>
+    <div class="v ${cls || ""}">${esc(v)}</div>
+    ${hint ? `<div class="h">${esc(hint)}</div>` : ""}</div>`;
 }
 
-function facts(summary, localise, lan) {
+function facts(summary, localise) {
   const si = summary.status_inputs || {};
   const warn = si.forwarded_warn_ms;
-  // The newest Mac<->NAS run, from `/api/lan-speed` (oldest-first). It is a
-  // measurement, not a status input, so its tiles are never coloured — but it is
-  // still aged, because a stale throughput figure that looks current is the same
-  // defect as an unqualified green light.
-  const lruns = (lan || {}).lan_speeds || [];
-  const lnew = lruns.length ? lruns[lruns.length - 1] : null;
-  const lhint = lnew ? `${lnew.peer || "NAS"} · ${ago(lnew.age_s)}` : "no LAN run yet";
+  // The per-peer LAN runs, from the summary. Each is a measurement, not a status
+  // input, so its tiles are never coloured — but each is still aged, because a
+  // stale throughput figure that looks current is the same defect as an
+  // unqualified green light. One pair of tiles per peer (NAS, ryzen, …).
+  const peers = summary.lan_peers || [];
   const excessLimit = si.forwarded_excess_ms;
   // The fault comes from the server (`reading.fault`), not from re-deciding the
   // rule here: two implementations of "is the path at fault" is how a tile and
@@ -276,6 +274,23 @@ function facts(summary, localise, lan) {
     ? (warn == null ? "no threshold set" : `warn ≥ ${fmt(warn, 1)} ms`)
     : `within ${fmt(excessLimit, 1)} ms of the router`;
 
+  // The internal wire, measured daily between this Mac and each peer we own.
+  // Separate from Down/Up above, which are the internet: one pair of tiles and
+  // one chart per link, so a 2.5 Gb ryzen run is never squashed onto a 1 Gb NAS
+  // scale. One pair per peer, newest activity first.
+  const lanTiles = peers.length
+    ? peers.flatMap((p) => {
+        const n = p.newest || {};
+        const hint = `${p.peer || p.name} · ${ago(p.age_s)}`;
+        return [
+          fact(`LAN ↓ ${p.name}`, n.dl_mbps == null ? "–" : fmt(n.dl_mbps, 1) + " Mbps",
+               hint, "", "landown"),
+          fact(`LAN ↑ ${p.name}`, n.ul_mbps == null ? "–" : fmt(n.ul_mbps, 1) + " Mbps",
+               hint, "", "lanup"),
+        ];
+      })
+    : [fact("LAN", "–", "no LAN run yet", "", "landown")];
+
   const tiles = [
     fact("Forwarded path RTT", fmt(si.forwarded_rtt_ms, 1) + " ms",
          pathHint, pathCls, "forwarded"),
@@ -297,13 +312,7 @@ function facts(summary, localise, lan) {
     fact("Up", fmt(si.ul_mbps, 1) + " Mbps",
          uww == null ? "no threshold set" : `warn below ${fmt(uww, 0)}`,
          thrCls(si.ul_mbps, uww), "up"),
-    // The internal wire, measured daily between this Mac and the NAS. Separate
-    // from Down/Up above, which are the internet: one chart per link, so neither
-    // axis has to explain the other.
-    fact("LAN down", lnew ? fmt(lnew.dl_mbps, 1) + " Mbps" : "–",
-         lhint, "", "landown"),
-    fact("LAN up", lnew ? fmt(lnew.ul_mbps, 1) + " Mbps" : "–",
-         lhint, "", "lanup"),
+    ...lanTiles,
     fact("en0 errors", String(si.en0_errors == null ? "–" : si.en0_errors),
          si.en0_errors == null ? "no # iferrs in window" : "ierrs+oerrs+coll; zero expected",
          en0Cls, "en0"),
@@ -394,36 +403,71 @@ function speedChart(data, warn) {
     (servers.length > 1 ? ` · server changed: ${servers.join(" → ")}` : "");
 }
 
-// The same chart, over the runs from `/api/lan-speed`: the Mac<->NAS wire. No
-// warn line — a LAN test has no host threshold to draw (it is a measurement, not
-// a status input), and a threshold invented here would be a second opinion about
-// the wire that nothing else agrees with.
-function lanChart(data) {
-  const svg = document.getElementById("lan");
-  const note = document.getElementById("lan-note");
-  const runs = data.lan_speeds || [];
-  if (!runs.length) {
-    clear(svg);
-    text(svg, 10, 24, "no LAN tests in the window");
-    note.textContent = "the daily Mac↔NAS run has not recorded yet — " +
-      "check that the NAS iperf3 server is up";
+// One LAN section per peer, over the runs from `/api/lan-speed`. The NAS and
+// ryzen are different links with different ceilings (~1 Gb vs ~2.5 Gb), so each
+// gets its own chart on its own scale rather than sharing one axis where the
+// faster peer would flatten the slower. No warn line on any of them — a LAN test
+// has no host threshold to draw (it is a measurement, not a status input), and a
+// threshold invented here would be a second opinion about the wire that nothing
+// else agrees with.
+function lanSections(data) {
+  const host = document.getElementById("lan-sections");
+  host.innerHTML = "";
+  const peers = (data && data.by_peer) || [];
+  if (!peers.length) {
+    const sec = document.createElement("section");
+    sec.innerHTML =
+      `<div class="sechead"><h2>LAN bandwidth (Mbps)</h2>` +
+      `<button class="run" data-check="lan-speed" data-msg="lan-speed-runmsg" ` +
+      `title="Re-run the daily LAN iperf3 tests now, via their own launchd job">Run now</button></div>` +
+      `<p class="muted small runmsg" id="lan-speed-runmsg"></p>` +
+      `<p class="muted small">no LAN tests in the window — the daily Mac↔peer run ` +
+      `has not recorded yet. Check that each peer's iperf3 server is up.</p>`;
+    host.appendChild(sec);
+    bindRunButtons(host);
     return;
   }
-  drawBars(svg, runs, {
-    warn: null,
-    dlColor: "#5ee08a", ulColor: "#63b3ed",
-    dlLabel: "down (NAS → Mac)", ulLabel: "up (Mac → NAS)",
-    legend: document.getElementById("lan-legend"),
-    sub: r => r.peer || "NAS",
-    tip: (r, label, v) => `${r.ts} — ${label} ${v.toFixed(1)} Mbps ` +
-      `with ${r.peer || "the NAS"}`,
+  peers.forEach((p, i) => {
+    const runs = p.runs || [];
+    const svgId = `lan-${i}`, legendId = `lan-${i}-legend`;
+    const noteId = `lan-${i}-note`, msgId = `lan-${i}-runmsg`;
+    const sec = document.createElement("section");
+    // The name is data (the producer's LAN_PEERS label, or the peer address), so
+    // it is escaped before it goes into the heading.
+    sec.innerHTML =
+      `<div class="sechead">` +
+      `<h2>LAN bandwidth — Mac ↔ ${esc(p.name)} (Mbps)</h2>` +
+      `<button class="run" data-check="lan-speed" data-msg="${msgId}" ` +
+      `title="Re-run the daily LAN iperf3 tests now, via their own launchd job">Run now</button></div>` +
+      `<p class="muted small runmsg" id="${msgId}"></p>` +
+      `<div class="legend" id="${legendId}"></div>` +
+      `<svg id="${svgId}" viewBox="0 0 1000 240" preserveAspectRatio="none"></svg>` +
+      `<p class="muted small" id="${noteId}"></p>`;
+    host.appendChild(sec);
+
+    const svg = document.getElementById(svgId);
+    const note = document.getElementById(noteId);
+    if (!runs.length) {
+      clear(svg);
+      text(svg, 10, 24, "no runs in the window");
+      return;
+    }
+    drawBars(svg, runs, {
+      warn: null,
+      dlColor: "#5ee08a", ulColor: "#63b3ed",
+      dlLabel: "down (peer → Mac)", ulLabel: "up (Mac → peer)",
+      legend: document.getElementById(legendId),
+      sub: () => "",
+      tip: (r, label, v) => `${r.ts} — ${label} ${v.toFixed(1)} Mbps ` +
+        `with ${r.peer || p.name}`,
+    });
+    const first = runs[0], last = runs[runs.length - 1];
+    const gbps = v => (v == null ? "–" : (v / 1000).toFixed(2));
+    note.textContent = `${runs.length} run(s), oldest ${mmdd(first.ts)} · ` +
+      `newest ${fmt(last.dl_mbps, 0)}/${fmt(last.ul_mbps, 0)} Mbps down/up ` +
+      `(${gbps(last.dl_mbps)}/${gbps(last.ul_mbps)} Gbps) with ${p.peer || p.name}`;
   });
-  const first = runs[0], last = runs[runs.length - 1];
-  const gbps = v => (v / 1000).toFixed(2);
-  note.textContent = `${runs.length} run(s), oldest ${mmdd(first.ts)} · ` +
-    `newest ${fmt(last.dl_mbps, 0)}/${fmt(last.ul_mbps, 0)} Mbps down/up ` +
-    `(${gbps(last.dl_mbps || 0)}/${gbps(last.ul_mbps || 0)} Gbps) with ` +
-    `${last.peer || "the NAS"}`;
+  bindRunButtons(host);
 }
 
 // ------------------------------------------------------------------- the page
@@ -446,10 +490,10 @@ async function load() {
     dl_warn_mbps: si0.dl_warn_mbps == null ? "not set" : fmt(si0.dl_warn_mbps, 0) + " Mbps",
     ul_warn_mbps: si0.ul_warn_mbps == null ? "not set" : fmt(si0.ul_warn_mbps, 0) + " Mbps",
   };
-  document.getElementById("facts").innerHTML = facts(summary, localise, lanSpeed);
+  document.getElementById("facts").innerHTML = facts(summary, localise);
 
   speedChart(speed, (summary.status_inputs || {}).dl_warn_mbps);
-  lanChart(lanSpeed);
+  lanSections(lanSpeed);
 }
 document.getElementById("facts").addEventListener("click", (e) => {
   const tile = e.target.closest(".fact.link");
@@ -526,11 +570,22 @@ async function rerun(check, btn, msg) {
   waitButton(btn, body.retry_after_s || body.cooldown_s || 120);
 }
 
-document.querySelectorAll("button.run").forEach((btn) => {
-  const check = btn.dataset.check;
-  btn.addEventListener("click", () =>
-    rerun(check, btn, document.getElementById(check + "-runmsg")));
-});
+// Bake the click handler onto every run button under `root`, once. The LAN
+// sections are built after the first fetch, so this is called again for them;
+// `data-bound` keeps the static WAN button from collecting a second handler.
+// Each button names its own message line (`data-msg`), because several LAN
+// buttons share one check and would otherwise all report into one paragraph.
+function bindRunButtons(root) {
+  root.querySelectorAll("button.run").forEach((btn) => {
+    if (btn.dataset.bound) return;
+    btn.dataset.bound = "1";
+    const check = btn.dataset.check;
+    const msgId = btn.dataset.msg || (check + "-runmsg");
+    btn.addEventListener("click", () =>
+      rerun(check, btn, document.getElementById(msgId)));
+  });
+}
+bindRunButtons(document);
 load();
 </script>
 </body>

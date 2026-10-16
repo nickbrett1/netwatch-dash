@@ -15,7 +15,7 @@ deployment path now** — one artifact both populates and wires. `deploy/` and
 | File here | Origin on mac-studio | Role |
 | --- | --- | --- |
 | `gwping.py` | `~/netwatch/gwping.py` | Continuous writer of `~/netwatch/gateway_rtt.csv`; also the authenticated Orbi poll that emits `# orbi` markers and `# link_change` |
-| `netwatch` | `~/.local/bin/netwatch` | The `probe` (300 s), `speed` (daily 04:00) and `lan-speed` (daily 04:10, iperf3 Mac↔NAS; client on the NAS in `LAN_PEER_MODE=peer`) subcommands; appends to `~/.local/state/netwatch/events.jsonl` |
+| `netwatch` | `~/.local/bin/netwatch` | The `probe` (300 s), `speed` (daily 04:00) and `lan-speed` (daily 04:10, iperf3 Mac↔each peer in `LAN_PEERS` — "nas", "ryzen", … — one event per peer, in `LAN_PEER_MODE=peer` when the host blocks the local client) subcommands; appends to `~/.local/state/netwatch/events.jsonl` |
 | `flapwatch` | `~/.local/bin/flapwatch` | Not scheduled by any launchd job |
 | `check_link.sh` | `~/netwatch/check_link.sh` | Not scheduled by any launchd job |
 | `probe_icmp_vs_tcp.py` | `~/netwatch/probe_icmp_vs_tcp.py` | Diagnostic |
@@ -45,6 +45,7 @@ more. This is the case for co-location, recorded as it happens:
 | (this repo) | `gwping.py` gained `# iferrs` per §8 | Consumer must know the marker or it counts as drift forever |
 | 2026-10-02 (this repo) | `netwatch` gained `LAN_PEER_MODE`; in `peer` mode the iperf3 client runs on the peer over ssh, server on the Mac | macOS Local Network Privacy had silently denied the locally-run iperf3 every LAN peer but the gateway since 2026-09-30, so the daily `lan-speed` job wrote nothing (`EHOSTUNREACH`); peer mode restores the runs. Event shape is unchanged |
 | 2026-10-04 (this repo) | `netwatch speed` gained server selection + retry (`SPEEDTEST_SERVER_IDS`, `SPEEDTEST_RETRY_LOW`, `SPEEDTEST_MAX_RUNS`), and a `speed` run below `DL/UL_WARN_MBPS` is confirmed on a different server | The daily run auto-selected one New York Ookla server that read ~150 Mbps up while the link was fine (every other server read ~540, and the LAN test read 913/893): a single degraded test server could set the dashboard to `warn`. The `speed` event shape is unchanged — it still names the one server its numbers came from |
+| 2026-10-16 (this repo) | `netwatch lan-speed` gained `LAN_PEERS` (a list) and per-peer overrides `LAN_PEER_<p>_*`, and its `lan_speed` event gained the optional `peer_name`. With `LAN_PEERS` empty the run is byte-for-byte the old single-peer behaviour | A second LAN peer arrived — a 2.5 Gb box ("ryzen") beside the 1 Gb NAS — and one peer per `LAN_PEER` could not measure both. The event is additive (`peer` unchanged, `peer_name` new), so a consumer that does not know the new field sees more `lan_speed` lines, not a changed shape. This is the ryzen addition; `producers/netwatch` here is the copy that runs it |
 
 `producers/netwatch` was refreshed from the host after the second change; its
 sha256 is now `d728858a…`. `producers/gwping.py` carried the `# iferrs` addition

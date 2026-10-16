@@ -421,6 +421,58 @@ def test_a_lan_speed_run_is_reported_but_never_moves_the_status(tmp_path):
     assert any("lan_speed" in r for r in snap.status_reason())
 
 
+def test_lan_runs_group_by_peer(tmp_path):
+    """Two peers, two groups: the NAS and a faster ryzen never share a chart.
+
+    The event carries one run against one peer; the page wants one section per
+    peer. Grouping is the consumer's job, keyed by `peer_name`.
+    """
+    lan = "\n".join(
+        json.dumps(
+            {"ts": ts, "kind": "lan_speed", "peer": peer, "peer_name": name,
+             "dl_mbps": dl, "ul_mbps": ul}
+        )
+        for ts, peer, name, dl, ul in (
+            ("2026-10-15T04:10:00Z", "192.168.1.2", "nas", 941.2, 938.7),
+            ("2026-10-15T04:11:00Z", "192.168.1.20", "ryzen", 2340.0, 2351.0),
+            ("2026-10-16T04:10:00Z", "192.168.1.2", "nas", 930.0, 925.0),
+            ("2026-10-16T04:11:00Z", "192.168.1.20", "ryzen", 2360.0, 2355.0),
+        )
+    )
+    settings = make_settings(tmp_path, events_text=lan)
+    snap = snapshot.build(settings, now=at("2026-10-16T12:00:00Z"))
+
+    body = snap.collection("lan_speed", 20)
+    groups = {g["name"]: g for g in body["by_peer"]}
+
+    assert set(groups) == {"nas", "ryzen"}
+    # Each group holds only its own peer's runs, oldest first.
+    assert [r["peer"] for r in groups["nas"]["runs"]] == ["192.168.1.2"] * 2
+    assert groups["nas"]["runs"][0]["dl_mbps"] == 941.2
+    assert groups["nas"]["newest"]["dl_mbps"] == 930.0
+    assert groups["ryzen"]["newest"]["dl_mbps"] == 2360.0
+    # Newest activity first: both ran in the 2026-10-16 round, ryzen's run later.
+    assert [g["name"] for g in body["by_peer"]] == ["ryzen", "nas"]
+
+
+def test_lan_peer_falls_back_to_the_address_when_unnamed(tmp_path):
+    """A legacy single-peer run carries no `peer_name`; the address is the name."""
+    lan = json.dumps(
+        {"ts": "2026-09-29T04:10:00Z", "kind": "lan_speed",
+         "peer": "192.168.1.2", "dl_mbps": 941.2, "ul_mbps": 938.7}
+    )
+    settings = make_settings(tmp_path, events_text=lan)
+    snap = snapshot.build(settings, now=at(AFTER_NEWEST))
+
+    peers = snap.summary()["lan_peers"]
+
+    assert len(peers) == 1
+    assert peers[0]["name"] == "192.168.1.2"
+    assert peers[0]["peer"] == "192.168.1.2"
+    assert peers[0]["newest"]["dl_mbps"] == 941.2
+    assert peers[0]["newest"]["peer_name"] is None
+
+
 def test_summary_carries_its_own_evidence(tmp_path):
     settings = make_settings(
         tmp_path,

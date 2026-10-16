@@ -31,10 +31,17 @@ PROBE_FIELDS = frozenset(
     }
 )
 SPEED_FIELDS = frozenset({"ts", "kind", "dl_mbps", "ul_mbps", "ping_ms", "server"})
-# The Mac<->NAS LAN throughput test (`netwatch lan-speed`), added 2026-09-29.
+# The Mac<->peer LAN throughput test (`netwatch lan-speed`), added 2026-09-29.
 # Same dl/ul shape as `speed`, but the peer is named instead of a speed-test
 # server: this measures the wire between two boxes we own, not the WAN.
-LAN_SPEED_FIELDS = frozenset({"ts", "kind", "peer", "dl_mbps", "ul_mbps"})
+#
+# `peer_name` (added 2026-10-16) is the human label for that peer — "nas",
+# "ryzen" — so the page can head a section with a name rather than an IP. It is
+# optional: a single-peer config that never set `LAN_PEERS` writes only `peer`,
+# and the consumer then falls back to the address as the identity.
+LAN_SPEED_FIELDS = frozenset(
+    {"ts", "kind", "peer", "peer_name", "dl_mbps", "ul_mbps"}
+)
 CSV_TARGETS = frozenset({"gw", "wire", "wl", "net"})
 CSV_MARKERS = frozenset(
     {
