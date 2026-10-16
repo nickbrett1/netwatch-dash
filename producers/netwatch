@@ -245,20 +245,18 @@ peer_iperf_dir() {  # <ssh> <ssh_port> <peer_iperf> <mac_ip> <port> <dur> <strea
 }
 
 # --- per-peer settings ----------------------------------------------------
-# A peer named <p> reads LAN_PEER_<p>_<SUFFIX> first, then the global LAN_<SUFFIX>,
-# then the built-in default. The address itself is LAN_PEER_<p> (there is no
-# global LAN_ADDR). `${!var}` is bash indirect expansion — this script is bash.
+# A peer named <p> may override a setting with LAN_PEER_<p>_<SUFFIX> (its address
+# is LAN_PEER_<p>, no SUFFIX). Anything it does not override comes from the
+# caller-supplied default — which is the *global* variable (LAN_PEER_MODE,
+# LAN_SSH, …) resolved by run_lan_peer below. The global is passed in as the
+# default rather than guessed here from the SUFFIX, because the globals do not
+# share one prefix: the mode is LAN_PEER_MODE, not LAN_MODE, and a fallback that
+# spelled it LAN_<SUFFIX> would miss `LAN_PEER_MODE=peer` and quietly run every
+# peer in mac mode. `${!var}` is bash indirect expansion — this script is bash.
 peer_get() {  # <name> <SUFFIX>   (SUFFIX empty = the address); prints nothing if unset
-  local name="$1" suffix="$2" var value
-  var="LAN_PEER_${name}${suffix:+_$suffix}"
-  value="${!var:-}"
-  if [ -n "$value" ]; then printf '%s' "$value"; return 0; fi
-  if [ -n "$suffix" ]; then
-    var="LAN_${suffix}"
-    value="${!var:-}"
-    if [ -n "$value" ]; then printf '%s' "$value"; return 0; fi
-  fi
-  return 1
+  local var="LAN_PEER_${1}${2:+_$2}"
+  local value="${!var:-}"
+  [ -n "$value" ] && printf '%s' "$value"
 }
 peer_set() {  # <name> <SUFFIX> <default>
   local v
@@ -282,7 +280,8 @@ emit_lan() {  # <name> <peer> <dl> <up>
 run_lan_peer() {  # <name> <peer>
   local name="$1" peer="$2"
   local mode port dur streams ssh ssh_port per_iperf bind
-  mode=$(peer_set "$name" MODE mac)
+  # The globals are the defaults; a per-peer override wins (peer_set).
+  mode=$(peer_set "$name" MODE "$LAN_PEER_MODE")
   port=$(peer_set "$name" PORT "$LAN_PORT")
   dur=$(peer_set "$name" DURATION "$LAN_DURATION")
   streams=$(peer_set "$name" STREAMS "$LAN_STREAMS")
