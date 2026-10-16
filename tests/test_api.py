@@ -425,7 +425,8 @@ def test_lan_runs_group_by_peer(tmp_path):
     """Two peers, two groups: the NAS and a faster ryzen never share a chart.
 
     The event carries one run against one peer; the page wants one section per
-    peer. Grouping is the consumer's job, keyed by `peer_name`.
+    peer. Grouping is the consumer's job, keyed by the peer's ADDRESS so a
+    relabelled wire stays in one chart; `peer_name` is only the section heading.
     """
     lan = "\n".join(
         json.dumps(
@@ -471,6 +472,37 @@ def test_lan_peer_falls_back_to_the_address_when_unnamed(tmp_path):
     assert peers[0]["peer"] == "192.168.1.2"
     assert peers[0]["newest"]["dl_mbps"] == 941.2
     assert peers[0]["newest"]["peer_name"] is None
+
+
+def test_labelling_a_peer_does_not_split_its_history(tmp_path):
+    """The first named run joins the unnamed runs for the same address.
+
+    Identity is the address, not the label: an old single-peer run against
+    192.168.1.2 and a new run labelled "nas" against the same address are one
+    wire and must share one chart — otherwise naming the peer would fork its
+    history into a second, duplicate section.
+    """
+    lan = "\n".join(
+        json.dumps(rec)
+        for rec in (
+            {"ts": "2026-10-15T04:10:00Z", "kind": "lan_speed",
+             "peer": "192.168.1.2", "dl_mbps": 941.2, "ul_mbps": 938.7},
+            {"ts": "2026-10-16T04:10:00Z", "kind": "lan_speed",
+             "peer": "192.168.1.2", "peer_name": "nas", "dl_mbps": 930.0,
+             "ul_mbps": 925.0},
+        )
+    )
+    settings = make_settings(tmp_path, events_text=lan)
+    snap = snapshot.build(settings, now=at(AFTER_NEWEST))
+
+    peers = snap.summary()["lan_peers"]
+
+    assert len(peers) == 1
+    assert peers[0]["peer"] == "192.168.1.2"
+    # The section is headed with the newest label the peer was given...
+    assert peers[0]["name"] == "nas"
+    # ...and still holds the unnamed run that came before it.
+    assert [r["dl_mbps"] for r in peers[0]["runs"]] == [941.2, 930.0]
 
 
 def test_summary_carries_its_own_evidence(tmp_path):

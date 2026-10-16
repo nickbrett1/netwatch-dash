@@ -83,11 +83,13 @@ healthy.
 **One run per peer.** The host names the peers it tests in `LAN_PEERS`
 (`nas ryzen`), and each writes its own record: a 1 Gb NAS and a 2.5 Gb ryzen are
 two different wires, measured and charted apart. `peer` is the address, always
-present. `peer_name` (added 2026-10-16) is the human label from `LAN_PEERS` and
-is **optional** — a host that never set `LAN_PEERS` runs the single
-`LAN_PEER`/`NET_PEER` peer and writes no `peer_name`, so the consumer takes the
-address as the identity. The consumer groups by `peer_name or peer` and heads one
-section per peer.
+present, and is the peer's **identity** — the thing that was measured.
+`peer_name` (added 2026-10-16) is the human label from `LAN_PEERS` and is
+**optional** — a host that never set `LAN_PEERS` runs the single
+`LAN_PEER`/`NET_PEER` peer and writes no `peer_name`. The consumer groups by
+`peer` (the address) and heads one section per peer, using the newest
+`peer_name` it saw or the address when the peer was never named — so naming a
+peer does not fork its earlier unnamed runs into a second, duplicate section.
 
 Directions are named from the **Mac's** point of view: `ul_mbps` is what the Mac
 sends (iperf3 default), `dl_mbps` is what it receives (`iperf3 -R`). Either end

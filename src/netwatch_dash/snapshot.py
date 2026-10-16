@@ -306,10 +306,13 @@ class Snapshot:
 
         The event carries one run against one peer; the page wants one section
         per peer (Mac↔NAS, Mac↔ryzen, …), so the grouping is done here rather
-        than in the browser. Identity is `peer_name` when the producer named the
-        peer, else the address — a single-peer config writes only `peer` and
-        still gets a group, keyed by its address, so the page never has to
-        special-case "no name".
+        than in the browser. A peer's identity is its ADDRESS (`peer`) — the
+        stable thing that was measured; `peer_name` is only the label to head the
+        section with. Keying on the address (not the name) keeps one wire in one
+        chart when its labelling changes: the first named run does not split off
+        from the unnamed runs that came before it, and a single-peer config that
+        writes only `peer` still gets a group, keyed by its address, so the page
+        never has to special-case "no name".
 
         Each group carries every run in the window (oldest first, so the chart
         draws left-to-right), the newest run on its own, and its age. A group
@@ -319,7 +322,9 @@ class Snapshot:
         groups: dict[str, dict] = {}
         order: list[str] = []
         for record in records:
-            key = str(record.get("peer_name") or record.get("peer") or "unknown")
+            # The address is the identity; the name is only a label. A record
+            # with no address (should not happen) falls back to its name.
+            key = str(record.get("peer") or record.get("peer_name") or "unknown")
             group = groups.get(key)
             if group is None:
                 group = groups[key] = {
@@ -331,7 +336,7 @@ class Snapshot:
                 order.append(key)
             group["runs"].append(record)
             # Later records are newer (the list is ts-ordered), so the last write
-            # wins; a peer whose address changed keeps the newest as its label.
+            # wins; a peer labelled later keeps the newest label it was given.
             group["peer"] = record.get("peer") or group["peer"]
             group["name"] = record.get("peer_name") or group["name"]
         out: list[dict] = []
